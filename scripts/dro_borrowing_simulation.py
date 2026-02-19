@@ -11,6 +11,7 @@ from scipy.special import betaln, expit, logsumexp  # type: ignore
 from scipy.stats import norm, wasserstein_distance  # type: ignore
 import matplotlib
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
@@ -21,7 +22,11 @@ def set_plot_style() -> None:
     plt.rcParams.update(
         {
             "font.family": "Times New Roman",
-            "font.size": 12,
+            "font.size": 24,
+            "axes.labelsize": 28,
+            "xtick.labelsize": 24,
+            "ytick.labelsize": 24,
+            "legend.fontsize": 24,
             "mathtext.fontset": "stix",
             "text.usetex": True,
             "pdf.fonttype": 42,
@@ -32,6 +37,26 @@ def set_plot_style() -> None:
 
 def math_label(expr: str) -> str:
     return rf"$${expr}$$"
+
+
+def save_legend_pdf(
+    path: Path,
+    handles: list[Line2D],
+    labels: list[str],
+    ncol: int = 5,
+    fontsize: float = 24.0,
+) -> None:
+    if len(handles) == 0:
+        return
+    ncol_eff = max(1, min(ncol, len(labels)))
+    height = max(2.2, 1.2 + 0.85 * math.ceil(len(labels) / ncol_eff))
+    width = max(16.0, 1.8 + 3.2 * ncol_eff)
+    fig_leg, ax_leg = plt.subplots(figsize=(width, height))
+    ax_leg.axis("off")
+    ax_leg.legend(handles, labels, loc="center", ncol=ncol_eff, frameon=False, fontsize=fontsize)
+    fig_leg.tight_layout()
+    fig_leg.savefig(path, format="pdf", bbox_inches="tight")
+    plt.close(fig_leg)
 
 
 def z_alpha(alpha: float) -> float:
@@ -1360,7 +1385,7 @@ def build_method_specs(p: Params) -> list[MethodSpec]:
     specs.append(MethodSpec(name="BHMOI", family="bhmoi"))
     specs.append(MethodSpec(name="Nonpara Bayes", family="npb"))
     specs.append(MethodSpec(name="Test-then-pool", family="test_then_pool"))
-    specs.append(MethodSpec(name="DRO-opt", family="dro"))
+    specs.append(MethodSpec(name="BOND", family="dro"))
     return specs
 
 
@@ -1385,15 +1410,15 @@ def build_method_styles(method_order: list[str]) -> dict[str, dict[str, object]]
             "marker": marker,
             "linestyle": linestyle,
             "color": colors[idx % len(colors)],
-            "linewidth": 1.8,
-            "markersize": 5.5,
+            "linewidth": 3.2,
+            "markersize": 10.0,
         }
-    if "DRO-opt" in style_map:
-        style_map["DRO-opt"].update(
+    if "BOND" in style_map:
+        style_map["BOND"].update(
             {
                 "color": "#c40000",
-                "linewidth": 2.8,
-                "markersize": 7.0,
+                "linewidth": 4.8,
+                "markersize": 13.0,
                 "marker": "o",
                 "linestyle": "-",
             }
@@ -1409,11 +1434,11 @@ def select_focus_methods(method_order: list[str]) -> list[str]:
         "Power prior(lambda=0.50)",
         "Commensurate prior(tau=1.00)",
         "Robust MAP(epsilon=0.20)",
-        "DRO-opt",
+        "BOND",
     ]
     selected = [m for m in preferred if m in method_order]
     for m in method_order:
-        if m not in selected and m == "DRO-opt":
+        if m not in selected and m == "BOND":
             selected.append(m)
     return selected
 
@@ -1844,8 +1869,8 @@ def run_simulation(p: Params) -> None:
                                 )
                             )
 
-                        if "DRO-opt" in type1_table[0]:
-                            dro_max = max(row["DRO-opt"] for row in type1_table)
+                        if "BOND" in type1_table[0]:
+                            dro_max = max(row["BOND"] for row in type1_table)
                             mc_se = math.sqrt(p.alpha * (1.0 - p.alpha) / p.m_type1)
                             tolerance = 3.0 * mc_se + 0.01
                             if stage_name == "oracle" and dro_max > p.alpha + tolerance:
@@ -1855,7 +1880,7 @@ def run_simulation(p: Params) -> None:
                                 )
 
                         stage_file = stage_name.replace(".", "p")
-                        fig, axes = plt.subplots(2, 1, figsize=(10, 8.3), sharex=True)
+                        fig, axes = plt.subplots(2, 1, figsize=(12.8, 9.8), sharex=True)
                         for method in method_order:
                             if method not in type1_table[0]:
                                 continue
@@ -1887,21 +1912,28 @@ def run_simulation(p: Params) -> None:
                             linestyle=(0, (4, 2)),
                             alpha=0.7,
                             label=math_label("\\alpha"),
+                            linewidth=2.6,
                         )
                         axes[0].set_ylabel("Type-I error")
-                        axes[0].set_title(
-                            f"Type-I error vs {math_label('\\\\gamma')} ({outcome}, {scenario.key}, n_H={n_historical}, {stage_name})"  # noqa: E501
-                        )
+                        # axes[0].set_title(
+                        #     f"Type-I error vs {math_label('\\\\gamma')} ({outcome}, {scenario.key}, n_H={n_historical}, {stage_name})"  # noqa: E501
+                        # )
                         axes[0].grid(True, alpha=0.3)
-                        axes[0].legend(fontsize=8.5, ncol=2)
 
                         axes[1].set_ylabel("Power")
                         axes[1].set_xlabel(math_label("\\gamma"))
-                        axes[1].set_title(
-                            f"Power vs {math_label('\\\\gamma')} ({outcome}, {scenario.key}, n_H={n_historical}, {stage_name})"  # noqa: E501
-                        )
+                        # axes[1].set_title(
+                        #     f"Power vs {math_label('\\\\gamma')} ({outcome}, {scenario.key}, n_H={n_historical}, {stage_name})"  # noqa: E501
+                        # )
                         axes[1].grid(True, alpha=0.3)
-                        axes[1].legend(fontsize=8.5, ncol=2)
+                        handles_all, labels_all = axes[0].get_legend_handles_labels()
+                        save_legend_pdf(
+                            p.outdir / f"type1_power_{outcome}_{scenario.key}_{stage_file}_nH{n_historical}_legend.pdf",
+                            handles_all,
+                            labels_all,
+                            ncol=5,
+                            fontsize=24.0,
+                        )
 
                         fig.tight_layout()
                         fig.savefig(
@@ -1910,7 +1942,7 @@ def run_simulation(p: Params) -> None:
                         )
                         plt.close(fig)
 
-                        fig, axes = plt.subplots(2, 1, figsize=(9.5, 7.6), sharex=True)
+                        fig, axes = plt.subplots(2, 1, figsize=(11.8, 8.9), sharex=True)
                         for method in focus_methods:
                             if method not in type1_table[0]:
                                 continue
@@ -1941,17 +1973,25 @@ def run_simulation(p: Params) -> None:
                             linestyle=(0, (4, 2)),
                             alpha=0.7,
                             label=math_label("\\alpha"),
+                            linewidth=2.6,
                         )
                         axes[0].set_ylabel("Type-I error")
-                        axes[0].set_title(
-                            f"Focused comparison ({outcome}, {scenario.key}, n_H={n_historical}, {stage_name})"
-                        )
+                        # axes[0].set_title(
+                        #     f"Focused comparison ({outcome}, {scenario.key}, n_H={n_historical}, {stage_name})"
+                        # )
                         axes[0].grid(True, alpha=0.3)
-                        axes[0].legend(fontsize=9.5, ncol=2)
                         axes[1].set_ylabel("Power")
                         axes[1].set_xlabel(math_label("\\gamma"))
                         axes[1].grid(True, alpha=0.3)
-                        axes[1].legend(fontsize=9.5, ncol=2)
+                        handles_focus, labels_focus = axes[0].get_legend_handles_labels()
+                        save_legend_pdf(
+                            p.outdir
+                            / f"type1_power_focus_{outcome}_{scenario.key}_{stage_file}_nH{n_historical}_legend.pdf",
+                            handles_focus,
+                            labels_focus,
+                            ncol=5,
+                            fontsize=24.0,
+                        )
                         fig.tight_layout()
                         fig.savefig(
                             p.outdir / f"type1_power_focus_{outcome}_{scenario.key}_{stage_file}_nH{n_historical}.pdf",
@@ -1959,7 +1999,7 @@ def run_simulation(p: Params) -> None:
                         )
                         plt.close(fig)
 
-                        fig, ax = plt.subplots(figsize=(9, 4.8))
+                        fig, ax = plt.subplots(figsize=(10.8, 6.4))
                         gammas = [row[0] for row in lambda_table]
                         lam0_vals = [row[1] for row in lambda_table]
                         lam1_vals = [row[2] for row in lambda_table]
@@ -1970,7 +2010,8 @@ def run_simulation(p: Params) -> None:
                             lam0_vals,
                             marker="o",
                             linestyle="-",
-                            linewidth=2.2,
+                            linewidth=4.0,
+                            markersize=11.5,
                             label=math_label("\\lambda_0^*"),
                         )
                         if scenario.hist_arms == "both":
@@ -1979,7 +2020,8 @@ def run_simulation(p: Params) -> None:
                                 lam1_vals,
                                 marker="D",
                                 linestyle="--",
-                                linewidth=2.0,
+                                linewidth=3.8,
+                                markersize=11.0,
                                 label=math_label("\\lambda_1^*"),
                             )
                         ax.plot(
@@ -1987,7 +2029,8 @@ def run_simulation(p: Params) -> None:
                             w0_vals,
                             marker="s",
                             linestyle="-.",
-                            linewidth=1.9,
+                            linewidth=3.6,
+                            markersize=10.8,
                             label=math_label("w_0(\\lambda^*)"),
                         )
                         if scenario.hist_arms == "both":
@@ -1996,17 +2039,25 @@ def run_simulation(p: Params) -> None:
                                 w1_vals,
                                 marker="^",
                                 linestyle=":",
-                                linewidth=1.9,
+                                linewidth=3.6,
+                                markersize=10.8,
                                 label=math_label("w_1(\\lambda^*)"),
                             )
                         ax.set_xlabel(math_label("\\gamma"))
                         ax.set_ylabel("Borrowing level")
-                        ax.set_title(
-                            f"Optimal borrowing vs {math_label('\\\\gamma')} ({outcome}, {scenario.key}, n_H={n_historical}, {stage_name})"  # noqa: E501
-                        )
+                        # ax.set_title(
+                        #     f"Optimal borrowing vs {math_label('\\\\gamma')} ({outcome}, {scenario.key}, n_H={n_historical}, {stage_name})"  # noqa: E501
+                        # )
                         ax.set_ylim(0.0, 1.0)
                         ax.grid(True, alpha=0.3)
-                        ax.legend(fontsize=10)
+                        handles_lambda, labels_lambda = ax.get_legend_handles_labels()
+                        save_legend_pdf(
+                            p.outdir / f"lambda_{outcome}_{scenario.key}_{stage_file}_nH{n_historical}_legend.pdf",
+                            handles_lambda,
+                            labels_lambda,
+                            ncol=5,
+                            fontsize=24.0,
+                        )
                         fig.tight_layout()
                         fig.savefig(
                             p.outdir / f"lambda_{outcome}_{scenario.key}_{stage_file}_nH{n_historical}.pdf",
