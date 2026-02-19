@@ -372,6 +372,32 @@ python-dateutil = ">=2.7"
 dev = ["meson-python (>=0.13.1,<0.17.0)", "pybind11 (>=2.13.2,!=2.13.3)", "setuptools (>=64)", "setuptools_scm (>=7)"]
 
 [[package]]
+name = "narwhals"
+version = "2.16.0"
+description = "Extremely lightweight compatibility layer between dataframe libraries"
+optional = false
+python-versions = ">=3.9"
+groups = ["main"]
+files = [
+    {file = "narwhals-2.16.0-py3-none-any.whl", hash = "sha256:846f1fd7093ac69d63526e50732033e86c30ea0026a44d9b23991010c7d1485d"},
+    {file = "narwhals-2.16.0.tar.gz", hash = "sha256:155bb45132b370941ba0396d123cf9ed192bf25f39c4cea726f2da422ca4e145"},
+]
+
+[package.extras]
+cudf = ["cudf-cu12 (>=24.10.0)"]
+dask = ["dask[dataframe] (>=2024.8)"]
+duckdb = ["duckdb (>=1.1)"]
+ibis = ["ibis-framework (>=6.0.0)", "packaging", "pyarrow-hotfix", "rich"]
+modin = ["modin"]
+pandas = ["pandas (>=1.1.3)"]
+polars = ["polars (>=0.20.4)"]
+pyarrow = ["pyarrow (>=13.0.0)"]
+pyspark = ["pyspark (>=3.5.0)"]
+pyspark-connect = ["pyspark[connect] (>=3.5.0)"]
+sql = ["duckdb (>=1.1)", "sqlparse"]
+sqlframe = ["sqlframe (>=3.22.0,!=3.39.3)"]
+
+[[package]]
 name = "numpy"
 version = "2.4.2"
 description = "Fundamental package for array computing in Python"
@@ -590,6 +616,46 @@ files = [
 diagrams = ["jinja2", "railroad-diagrams"]
 
 [[package]]
+name = "pyreadstat"
+version = "1.3.3"
+description = "Reads and Writes SAS, SPSS and Stata files into/from pandas and polars data frames."
+optional = false
+python-versions = "*"
+groups = ["main"]
+files = [
+    {file = "pyreadstat-1.3.3-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:c35b3c33aa51902227f2f951d7b623fece082dfea1eca6661144c1311beb13ad"},
+    {file = "pyreadstat-1.3.3-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:866dd57269b6ac40026363e97281ca8ee2b7097bf396cec7a1cd7622dd274222"},
+    {file = "pyreadstat-1.3.3-cp310-cp310-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:a5952b40d449f45637f330476b79a58d629ea36eaa483c11df0b9790dfed47ac"},
+    {file = "pyreadstat-1.3.3-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:a87e5f6fde6c42c172b7ad3b854073f15c05c5931a4ba0d76a0a202831c827cf"},
+    {file = "pyreadstat-1.3.3-cp310-cp310-win_amd64.whl", hash = "sha256:0add0430b987cb7c4433198f8a28578c20b563e644b04d362af9f427c7f7c216"},
+    {file = "pyreadstat-1.3.3-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:f209f3317aab85428c071265e0fc7ce598cb77ff0ff4d4b5bcec1c962ade68f8"},
+    {file = "pyreadstat-1.3.3-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:4a1a4217450fe837003d0c1965ba6ba5b374d8612ae97a9b532bc437b3a85e87"},
+    {file = "pyreadstat-1.3.3-cp311-cp311-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:faafe490c4281cca67687fef34169cd95e10110933fc9cf296233b47c63504cb"},
+    {file = "pyreadstat-1.3.3-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:d924373e0de19f14a6b733790c265f0670d7789e7c5f5a8b03962e772099cafb"},
+    {file = "pyreadstat-1.3.3-cp311-cp311-win_amd64.whl", hash = "sha256:65386b4f785e64323f29a605c9a4ef4689a43342f8702e9fceda05bdcbf50904"},
+    {file = "pyreadstat-1.3.3-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:9abdf57d6f2d32f77b778a45567274297eb7d425f6625df497defbf8e522d442"},
+    {file = "pyreadstat-1.3.3-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:30c5f2f5856233ea85c1671cca31f50ad7f2ef087cfe57b6a9d0e342c8140e5f"},
+    {file = "pyreadstat-1.3.3-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:32e96b0e7ba17340e9ebe008262aef4c5a80a01cf842795a0edbce4f8de39d08"},
+    {file = "pyreadstat-1.3.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:7931d10a29f79dfaf8207fdecd241e813bd0d02aa015ca2d997806a477e21de1"},
+    {file = "pyreadstat-1.3.3-cp312-cp312-win_amd64.whl", hash = "sha256:417f21aaff6eea3f024b4856fef42b1387ad967e46bddc89ceadd509a52d8ace"},
+    {file = "pyreadstat-1.3.3-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:d657abc17e30d0b51c9efd4d8e1cc9f8f5ebc2af0b46712bbda4aec2a996065f"},
+    {file = "pyreadstat-1.3.3-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:92866553c838478185632460d8c18cd479aa3cc550424298e26380c590e0dc87"},
+    {file = "pyreadstat-1.3.3-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:1ad8e1602fe9d8240d7087574d5cba1965b1e85a19daf3cad5743c859d20b65d"},
+    {file = "pyreadstat-1.3.3-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:0eac5560ed4233ee3fbe86551fe3bb9af6951cf37ec6fcdf3ad00a55286406fe"},
+    {file = "pyreadstat-1.3.3-cp313-cp313-win_amd64.whl", hash = "sha256:297506203b58a521c3b2831386f017a2cde2b8a139cfeb59abbaf81aa7fe9721"},
+    {file = "pyreadstat-1.3.3-cp314-cp314-macosx_10_15_x86_64.whl", hash = "sha256:605b32d3ea9313506ce900623afbe15610c4151b5bbee7bf7f96417d59616bae"},
+    {file = "pyreadstat-1.3.3-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:bd28cba80f45d9308efe7950f70402f46d4824dacfb1b6e9d1510aeed852b052"},
+    {file = "pyreadstat-1.3.3-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:ba8d550697efb9658a835107fb3d63237c313df2fbcb619bbc77ab637b1d32be"},
+    {file = "pyreadstat-1.3.3-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:7a12a47fbf636f9b4e6a6bc660bff84e1d26f188a6cd79a7f3f9a7b5d585892c"},
+    {file = "pyreadstat-1.3.3-cp314-cp314-win_amd64.whl", hash = "sha256:c397928fd7138253f7a8f3f27e5efd80e131645f062d541f80f264656c9e4bd0"},
+    {file = "pyreadstat-1.3.3.tar.gz", hash = "sha256:157afa4974ea76354aeccb03dbdb8cdfc8272b0b231bfb4d55b449e3f75c7071"},
+]
+
+[package.dependencies]
+narwhals = ">=2.10.1"
+numpy = "*"
+
+[[package]]
 name = "python-dateutil"
 version = "2.9.0.post0"
 description = "Extensions to the standard Python datetime module"
@@ -698,4 +764,4 @@ files = [
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.13"
-content-hash = "26c5d2404cf019d46d0a328b321c764f08ce82061598f7a97bcadb32fe10aac8"
+content-hash = "81fd21bb8681634e3800e9cb3da6f59fe9f2bbbc4cbb6bde087c578ac264735e"
