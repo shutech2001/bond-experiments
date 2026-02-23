@@ -56,7 +56,7 @@ python scripts/dro_borrowing_simulation.py \
 - `bond_lambda.csv`: BOND rho/lambda/weight/kappa per gamma.
 - `type1_power_*.pdf`, `type1_power_focus_*.pdf`, `lambda_*.pdf` plus legend PDFs.
 
-### Real-world analysis (binary)
+### Real-world analysis (data obtained from [Project Data Sphere](https://data.projectdatasphere.org/projectdatasphere/html/home), confidentiality constraints prevent further disclosure)
 ```bash
 python scripts/real_world_borrowing_analysis.py \
   --data real-world/merged_df.csv \
