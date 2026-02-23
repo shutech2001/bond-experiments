@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from numpy.typing import NDArray
@@ -35,19 +36,19 @@ SCENARIOS = {
         control_drift=False,
         hist_arms="both",
     ),
-    "S2": Scenario(
-        key="S2",
-        label="S2: Covariate shift + effect mod",
-        cov_shift=True,
-        effect_mod=True,
-        control_drift=False,
-        hist_arms="both",
-    ),
     "S1": Scenario(
         key="S1",
         label="S1: Covariate shift only",
         cov_shift=True,
         effect_mod=False,
+        control_drift=False,
+        hist_arms="both",
+    ),
+    "S2": Scenario(
+        key="S2",
+        label="S2: Covariate shift + effect mod",
+        cov_shift=True,
+        effect_mod=True,
         control_drift=False,
         hist_arms="both",
     ),
@@ -110,10 +111,47 @@ class BondCalibrationSummary:
     kappa_mean: float
 
 
+@dataclass(frozen=True)
+class GammaTaskSpec:
+    gamma_index: int
+    gamma: float
+    rho0: float
+    rho1: float
+    moments_null: Moments
+    n_c0: int
+    n_c1: int
+    n_h0: int
+    n_h1: int
+    seed_type1: int
+    seed_power: int
+
+
+@dataclass(frozen=True)
+class GammaTaskResult:
+    gamma_index: int
+    gamma: float
+    rho0: float
+    rho1: float
+    type1: Dict[str, float]
+    power: Dict[str, float]
+    bond_lambda0: float
+    bond_lambda1: float
+    bond_w0: float
+    bond_w1: float
+    bond_kappa: float
+
+
 class ProgressBar:
     """Simple terminal progress bar without external dependencies."""
 
     def __init__(self, total: int, enabled: bool = True, width: int = 32) -> None:
+        """Initialize the progress bar
+
+        Args:
+            total (int): The total number of steps
+            enabled (bool): Whether the progress bar is enabled
+            width (int): The width of the progress bar
+        """
         self.total = max(int(total), 1)
         self.enabled = bool(enabled)
         self.width = max(int(width), 10)
@@ -124,6 +162,11 @@ class ProgressBar:
             self._render("")
 
     def _render(self, suffix: str) -> None:
+        """Render the progress bar
+
+        Args:
+            suffix (str): The suffix
+        """
         ratio = float(self.count) / float(self.total)
         ratio = min(max(ratio, 0.0), 1.0)
         pct = int(round(ratio * 100.0))
@@ -138,12 +181,19 @@ class ProgressBar:
             print(f"[{pct:3d}%] {self.count}/{self.total} {suffix}", file=sys.stderr, flush=True)
 
     def update(self, step: int = 1, suffix: str = "") -> None:
+        """Update the progress bar
+
+        Args:
+            step (int): The step
+            suffix (str): The suffix
+        """
         if not self.enabled:
             return
         self.count = min(self.total, self.count + max(int(step), 0))
         self._render(suffix)
 
     def close(self) -> None:
+        """Close the progress bar"""
         if self.enabled and self._is_tty:
             print(file=sys.stderr, flush=True)
 
@@ -154,34 +204,33 @@ class Params:
     outdir: Path
     alpha: float
     theta1: float
-    gamma_grid: list[float]
+    gamma_grid: List[float]
     n_current: int
-    n_historical_grid: list[int]
+    n_historical_grid: List[int]
     m_type1: int
     m_power: int
-    outcomes: list[str]
-    scenarios: list[str]
-    stages: list[str]
-    rho_multipliers: list[float]
+    outcomes: List[str]
+    scenarios: List[str]
+    stages: List[str]
+    rho_multipliers: List[float]
     lambda_grid: int
     bond_calibration_mode: str
-    fixed_lambdas: list[float]
+    fixed_lambdas: List[float]
     mc_moments: int
     alpha_pool: float
-    power_prior_lambdas: list[float]
-    commensurate_taus: list[float]
-    map_lambdas: list[float]
-    map_weights: list[float] | None
-    rmap_epsilons: list[float]
-    elastic_scales: list[float]
-    uip_m_values: list[float]
+    power_prior_lambdas: List[float]
+    commensurate_taus: List[float]
+    map_lambdas: List[float]
+    map_weights: Optional[List[float]]
+    rmap_epsilons: List[float]
+    elastic_scales: List[float]
+    uip_m_values: List[float]
     leap_prior_omega: float
     leap_nex_scale: float
-    exnex_prior_ex: float
     mem_prior_inclusion: float
     mem_tau: float
     bhmoi_sharpness: float
-    npb_concentration: float | None
+    npb_concentration: Optional[float]
     npb_phi: float
     npb_temperature: float
     npb_sharpness: float
@@ -192,12 +241,18 @@ class Params:
     normal_prior_mean: float
     normal_prior_var: float
     vague_normal_var: float
+    n_jobs: int
     show_progress: bool
 
 
 def parse_args() -> Params:
+    """Parse the arguments
+
+    Returns:
+        Params: The parameters
+    """
     parser = argparse.ArgumentParser(description="DRO-based borrowing simulation (continuous + binary).")
-    parser.add_argument("--seed", type=int, default=202402)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--outdir", type=Path, default=Path("outputs/dro_simulation"))
     parser.add_argument("--alpha", type=float, default=0.025)
     parser.add_argument("--theta1", type=float, default=0.3)
@@ -307,12 +362,6 @@ def parse_args() -> Params:
         help="Concentration for LEAP prior exchangeability Beta distribution (>0).",
     )
     parser.add_argument(
-        "--exnex-prior-ex",
-        type=float,
-        default=0.7,
-        help="Prior exchangeable mixture weight for EXNEX.",
-    )
-    parser.add_argument(
         "--mem-prior-inclusion",
         type=float,
         default=0.5,
@@ -365,6 +414,12 @@ def parse_args() -> Params:
     parser.add_argument("--normal-prior-var", type=float, default=1e8)
     parser.add_argument("--vague-normal-var", type=float, default=1e8)
     parser.add_argument(
+        "--n-jobs",
+        type=int,
+        default=1,
+        help="Number of worker processes for gamma-level parallel simulation (>=1).",
+    )
+    parser.add_argument(
         "--no-progress",
         action="store_true",
         help="Disable progress bar output.",
@@ -401,7 +456,6 @@ def parse_args() -> Params:
         uip_m_values=su.parse_float_list(args.uip_m_values),
         leap_prior_omega=args.leap_prior_omega,
         leap_nex_scale=args.leap_nex_scale,
-        exnex_prior_ex=args.exnex_prior_ex,
         mem_prior_inclusion=args.mem_prior_inclusion,
         mem_tau=args.mem_tau,
         bhmoi_sharpness=args.bhmoi_sharpness,
@@ -416,11 +470,17 @@ def parse_args() -> Params:
         normal_prior_mean=args.normal_prior_mean,
         normal_prior_var=args.normal_prior_var,
         vague_normal_var=args.vague_normal_var,
+        n_jobs=args.n_jobs,
         show_progress=not bool(args.no_progress),
     )
 
 
 def validate_params(p: Params) -> None:
+    """Validate the parameters
+
+    Args:
+        p (Params): The parameters
+    """
     if not (0.0 < p.alpha < 1.0):
         raise ValueError("alpha must be in (0,1)")
     if p.theta1 <= 0.0:
@@ -431,6 +491,8 @@ def validate_params(p: Params) -> None:
         raise ValueError("n-historical-grid values must be >= 0")
     if p.m_type1 <= 0 or p.m_power <= 0:
         raise ValueError("Simulation sizes must be positive")
+    if p.n_jobs <= 0:
+        raise ValueError("n-jobs must be >= 1")
     if any(c <= 0.0 for c in p.rho_multipliers):
         raise ValueError("rho multipliers must be > 0")
     if p.lambda_grid < 11:
@@ -462,8 +524,6 @@ def validate_params(p: Params) -> None:
         raise ValueError("leap-prior-omega must be in (0,1)")
     if p.leap_nex_scale <= 0.0:
         raise ValueError("leap-nex-scale must be > 0")
-    if not (0.0 < p.exnex_prior_ex < 1.0):
-        raise ValueError("exnex-prior-ex must be in (0,1)")
     if not (0.0 < p.mem_prior_inclusion < 1.0):
         raise ValueError("mem-prior-inclusion must be in (0,1)")
     if p.mem_tau <= 0.0:
@@ -967,6 +1027,129 @@ def simulate_rates(
     return {method: counts[method] / m for method in methods}, summary
 
 
+def deterministic_seed(base_seed: int, *coords: int) -> int:
+    """Create a deterministic child seed from integer coordinates
+
+    Args:
+        base_seed (int): The base seed
+        coords (int): The coordinates
+
+    Returns:
+        int: The deterministic seed
+    """
+    seq = np.random.SeedSequence([base_seed, *coords])
+    return int(seq.generate_state(1)[0])
+
+
+def simulate_gamma_task(
+    task: GammaTaskSpec,
+    outcome: str,
+    scenario: Scenario,
+    n_current: int,
+    n_historical: int,
+    tau_null: float,
+    tau_alt: float,
+    method_specs: list[bm.MethodSpec],
+    p: Params,
+) -> GammaTaskResult:
+    """Simulate one gamma point (Type-I + power) for a given stage variant
+
+    Args:
+        task (GammaTaskSpec): The task specification
+        outcome (str): The outcome
+        scenario (Scenario): The scenario
+        n_current (int): The current sample size
+        n_historical (int): The historical sample size
+        tau_null (float): The null tau
+        tau_alt (float): The alternative tau
+        method_specs (list[bm.MethodSpec]): The method specifications
+        p (Params): The parameters
+    Returns:
+        GammaTaskResult: The task result
+    """
+    if p.bond_calibration_mode == "design":
+        bond_lam0, bond_lam1, bond_kappa = bm.bond_lambda_star(
+            outcome=outcome,
+            rho0=task.rho0,
+            rho1=task.rho1,
+            theta1=p.theta1,
+            mu_c0=task.moments_null.mu_c0,
+            mu_c1=task.moments_null.mu_c1,
+            var_c0=task.moments_null.var_c0,
+            var_c1=task.moments_null.var_c1,
+            var_h0=task.moments_null.var_h0,
+            var_h1=task.moments_null.var_h1,
+            n_c0=task.n_c0,
+            n_c1=task.n_c1,
+            n_h0=task.n_h0,
+            n_h1=task.n_h1,
+            grid=p.lambda_grid,
+        )
+    else:
+        bond_lam0 = 0.0
+        bond_lam1 = 0.0
+        bond_kappa = float("nan")
+
+    type1, type1_bond = simulate_rates(
+        rng=np.random.default_rng(task.seed_type1),
+        outcome=outcome,
+        scenario=scenario,
+        gamma=task.gamma,
+        n_current=n_current,
+        n_historical=n_historical,
+        tau_effect=tau_null,
+        m=p.m_type1,
+        alpha=p.alpha,
+        rho0=task.rho0,
+        rho1=task.rho1,
+        bond_lambda0=bond_lam0,
+        bond_lambda1=bond_lam1,
+        method_specs=method_specs,
+        p=p,
+    )
+    power, _ = simulate_rates(
+        rng=np.random.default_rng(task.seed_power),
+        outcome=outcome,
+        scenario=scenario,
+        gamma=task.gamma,
+        n_current=n_current,
+        n_historical=n_historical,
+        tau_effect=tau_alt,
+        m=p.m_power,
+        alpha=p.alpha,
+        rho0=task.rho0,
+        rho1=task.rho1,
+        bond_lambda0=bond_lam0,
+        bond_lambda1=bond_lam1,
+        method_specs=method_specs,
+        p=p,
+    )
+
+    if p.bond_calibration_mode == "replicate":
+        bond_lam0 = type1_bond.lambda0_mean
+        bond_lam1 = type1_bond.lambda1_mean
+        bond_w0 = type1_bond.w0_mean
+        bond_w1 = type1_bond.w1_mean
+        bond_kappa = type1_bond.kappa_mean
+    else:
+        bond_w0 = bm.w_from_lambda(bond_lam0, task.n_c0, task.n_h0)
+        bond_w1 = bm.w_from_lambda(bond_lam1, task.n_c1, task.n_h1)
+
+    return GammaTaskResult(
+        gamma_index=task.gamma_index,
+        gamma=task.gamma,
+        rho0=task.rho0,
+        rho1=task.rho1,
+        type1=type1,
+        power=power,
+        bond_lambda0=bond_lam0,
+        bond_lambda1=bond_lam1,
+        bond_w0=bond_w0,
+        bond_w1=bond_w1,
+        bond_kappa=bond_kappa,
+    )
+
+
 def run_simulation(p: Params) -> None:
     """Run the simulation
 
@@ -975,7 +1158,6 @@ def run_simulation(p: Params) -> None:
     """
     pu.set_plot_style()
     p.outdir.mkdir(parents=True, exist_ok=True)
-    rng = np.random.default_rng(p.seed)
 
     dgp = DGPParams(
         p=2,
@@ -1010,11 +1192,12 @@ def run_simulation(p: Params) -> None:
                 for stage in p.stages:
                     total_steps += stage_variant_count(stage) * len(p.gamma_grid)
     progress = ProgressBar(total=total_steps, enabled=p.show_progress)
+    executor = ProcessPoolExecutor(max_workers=p.n_jobs) if p.n_jobs > 1 else None
 
     try:
-        for n_historical in p.n_historical_grid:
-            for outcome in p.outcomes:
-                for scen_key in p.scenarios:
+        for n_historical_index, n_historical in enumerate(p.n_historical_grid):
+            for outcome_index, outcome in enumerate(p.outcomes):
+                for scenario_index, scen_key in enumerate(p.scenarios):
                     scenario = SCENARIOS[scen_key]
                     eta_scenario, _, _, _ = scenario_params(scenario, dgp)
 
@@ -1071,7 +1254,7 @@ def run_simulation(p: Params) -> None:
                         design_moments_null[gamma] = moments_null
                         w1_map_null[gamma] = (w1_c0, w1_c1)
 
-                    for stage in p.stages:
+                    for stage_index, stage in enumerate(p.stages):
                         if stage == "oracle":
                             stage_variants: list[tuple[str, float | None]] = [("oracle", None)]
                         elif stage == "data":
@@ -1079,7 +1262,7 @@ def run_simulation(p: Params) -> None:
                         else:
                             raise ValueError(f"Unknown stage: {stage}")
 
-                        for stage_name, rho_multiplier in stage_variants:
+                        for variant_index, (stage_name, rho_multiplier) in enumerate(stage_variants):
                             type1_table: list[dict[str, float]] = []
                             power_table: list[dict[str, float]] = []
                             lambda_table: list[tuple[float, float, float, float, float, float]] = []
@@ -1093,7 +1276,8 @@ def run_simulation(p: Params) -> None:
                                 n_h0 = n_historical
                                 n_h1 = 0
 
-                            for gamma in p.gamma_grid:
+                            gamma_tasks: list[GammaTaskSpec] = []
+                            for gamma_index, gamma in enumerate(p.gamma_grid):
                                 moments_null = design_moments_null[gamma]
                                 if stage_name == "oracle":
                                     rho0 = abs(moments_null.mu_h0 - moments_null.mu_c0)
@@ -1104,78 +1288,110 @@ def run_simulation(p: Params) -> None:
                                     rho0 = rho_multiplier * w1_c0
                                     rho1 = rho_multiplier * w1_c1
 
-                                if p.bond_calibration_mode == "design":
-                                    bond_lam0, bond_lam1, bond_kappa_val = bm.bond_lambda_star(
-                                        outcome=outcome,
+                                seed_type1 = deterministic_seed(
+                                    p.seed,
+                                    n_historical_index,
+                                    n_historical,
+                                    outcome_index,
+                                    scenario_index,
+                                    stage_index,
+                                    variant_index,
+                                    gamma_index,
+                                    0,
+                                )
+                                seed_power = deterministic_seed(
+                                    p.seed,
+                                    n_historical_index,
+                                    n_historical,
+                                    outcome_index,
+                                    scenario_index,
+                                    stage_index,
+                                    variant_index,
+                                    gamma_index,
+                                    1,
+                                )
+                                gamma_tasks.append(
+                                    GammaTaskSpec(
+                                        gamma_index=gamma_index,
+                                        gamma=gamma,
                                         rho0=rho0,
                                         rho1=rho1,
-                                        theta1=p.theta1,
-                                        mu_c0=moments_null.mu_c0,
-                                        mu_c1=moments_null.mu_c1,
-                                        var_c0=moments_null.var_c0,
-                                        var_c1=moments_null.var_c1,
-                                        var_h0=moments_null.var_h0,
-                                        var_h1=moments_null.var_h1,
+                                        moments_null=moments_null,
                                         n_c0=n_c0,
                                         n_c1=n_c1,
                                         n_h0=n_h0,
                                         n_h1=n_h1,
-                                        grid=p.lambda_grid,
+                                        seed_type1=seed_type1,
+                                        seed_power=seed_power,
                                     )
-                                else:
-                                    bond_lam0 = 0.0
-                                    bond_lam1 = 0.0
-                                    bond_kappa_val = float("nan")
-
-                                type1, type1_bond = simulate_rates(
-                                    rng=rng,
-                                    outcome=outcome,
-                                    scenario=scenario,
-                                    gamma=gamma,
-                                    n_current=p.n_current,
-                                    n_historical=n_historical,
-                                    tau_effect=tau_null,
-                                    m=p.m_type1,
-                                    alpha=p.alpha,
-                                    rho0=rho0,
-                                    rho1=rho1,
-                                    bond_lambda0=bond_lam0,
-                                    bond_lambda1=bond_lam1,
-                                    method_specs=method_specs,
-                                    p=p,
-                                )
-                                power, _ = simulate_rates(
-                                    rng=rng,
-                                    outcome=outcome,
-                                    scenario=scenario,
-                                    gamma=gamma,
-                                    n_current=p.n_current,
-                                    n_historical=n_historical,
-                                    tau_effect=tau_alt,
-                                    m=p.m_power,
-                                    alpha=p.alpha,
-                                    rho0=rho0,
-                                    rho1=rho1,
-                                    bond_lambda0=bond_lam0,
-                                    bond_lambda1=bond_lam1,
-                                    method_specs=method_specs,
-                                    p=p,
                                 )
 
-                                type1_table.append(type1)
-                                power_table.append(power)
+                            gamma_results: list[GammaTaskResult] = []
+                            if executor is None:
+                                for task in gamma_tasks:
+                                    result = simulate_gamma_task(
+                                        task=task,
+                                        outcome=outcome,
+                                        scenario=scenario,
+                                        n_current=p.n_current,
+                                        n_historical=n_historical,
+                                        tau_null=tau_null,
+                                        tau_alt=tau_alt,
+                                        method_specs=method_specs,
+                                        p=p,
+                                    )
+                                    gamma_results.append(result)
+                                    progress.update(
+                                        1,
+                                        (
+                                            f"nH={n_historical} | {outcome} | {scenario.key} | "
+                                            f"{stage_name} | gamma={task.gamma:g}"
+                                        ),
+                                    )
+                            else:
+                                futures = [
+                                    executor.submit(
+                                        simulate_gamma_task,
+                                        task,
+                                        outcome,
+                                        scenario,
+                                        p.n_current,
+                                        n_historical,
+                                        tau_null,
+                                        tau_alt,
+                                        method_specs,
+                                        p,
+                                    )
+                                    for task in gamma_tasks
+                                ]
+                                for future in as_completed(futures):
+                                    result = future.result()
+                                    gamma_results.append(result)
+                                    progress.update(
+                                        1,
+                                        (
+                                            f"nH={n_historical} | {outcome} | {scenario.key} | "
+                                            f"{stage_name} | gamma={result.gamma:g}"
+                                        ),
+                                    )
 
-                                if p.bond_calibration_mode == "replicate":
-                                    bond_lam0 = type1_bond.lambda0_mean
-                                    bond_lam1 = type1_bond.lambda1_mean
-                                    w0 = type1_bond.w0_mean
-                                    w1 = type1_bond.w1_mean
-                                    bond_kappa_val = type1_bond.kappa_mean
-                                else:
-                                    w0 = bm.w_from_lambda(bond_lam0, n_c0, n_h0)
-                                    w1 = bm.w_from_lambda(bond_lam1, n_c1, n_h1)
+                            gamma_results.sort(key=lambda item: item.gamma_index)
+                            if not gamma_results:
+                                continue
 
-                                lambda_table.append((gamma, bond_lam0, bond_lam1, w0, w1, bond_kappa_val))
+                            for result in gamma_results:
+                                type1_table.append(result.type1)
+                                power_table.append(result.power)
+                                lambda_table.append(
+                                    (
+                                        result.gamma,
+                                        result.bond_lambda0,
+                                        result.bond_lambda1,
+                                        result.bond_w0,
+                                        result.bond_w1,
+                                        result.bond_kappa,
+                                    )
+                                )
                                 lambda_rows.append(
                                     ",".join(
                                         [
@@ -1183,19 +1399,19 @@ def run_simulation(p: Params) -> None:
                                             outcome,
                                             scenario.key,
                                             stage_name,
-                                            f"{gamma:.4f}",
-                                            f"{rho0:.6f}",
-                                            f"{rho1:.6f}",
-                                            f"{bond_lam0:.6f}",
-                                            f"{bond_lam1:.6f}",
-                                            f"{w0:.6f}",
-                                            f"{w1:.6f}",
-                                            f"{bond_kappa_val:.6f}",
+                                            f"{result.gamma:.4f}",
+                                            f"{result.rho0:.6f}",
+                                            f"{result.rho1:.6f}",
+                                            f"{result.bond_lambda0:.6f}",
+                                            f"{result.bond_lambda1:.6f}",
+                                            f"{result.bond_w0:.6f}",
+                                            f"{result.bond_w1:.6f}",
+                                            f"{result.bond_kappa:.6f}",
                                         ]
                                     )
                                 )
 
-                                for method in type1.keys():
+                                for method in result.type1.keys():
                                     results_rows.append(
                                         ",".join(
                                             [
@@ -1203,20 +1419,13 @@ def run_simulation(p: Params) -> None:
                                                 outcome,
                                                 scenario.key,
                                                 stage_name,
-                                                f"{gamma:.4f}",
+                                                f"{result.gamma:.4f}",
                                                 method,
-                                                f"{type1[method]:.6f}",
-                                                f"{power[method]:.6f}",
+                                                f"{result.type1[method]:.6f}",
+                                                f"{result.power[method]:.6f}",
                                             ]
                                         )
                                     )
-                                progress.update(
-                                    1,
-                                    (
-                                        f"nH={n_historical} | {outcome} | {scenario.key} | "
-                                        f"{stage_name} | gamma={gamma:g}"
-                                    ),
-                                )
 
                             methods = type1_table[0].keys()
                             for method in methods:
@@ -1267,7 +1476,9 @@ def run_simulation(p: Params) -> None:
                                 methods=focus_methods,
                                 style_map=style_map,
                                 alpha=p.alpha,
-                                filename_stem=f"type1_power_focus_{outcome}_{scenario.key}_{stage_file}_nH{n_historical}",
+                                filename_stem=(
+                                    f"type1_power_focus_{outcome}_{scenario.key}_{stage_file}_nH{n_historical}"
+                                ),
                                 figsize=(11.8, 8.9),
                             )
 
@@ -1279,6 +1490,8 @@ def run_simulation(p: Params) -> None:
                             )
     finally:
         progress.close()
+        if executor is not None:
+            executor.shutdown(wait=True)
 
     results_path = p.outdir / "summary.csv"
     with results_path.open("w", encoding="utf-8") as f:
@@ -1308,11 +1521,6 @@ def run_simulation(p: Params) -> None:
 
 
 def main() -> None:
-    """Main function
-
-    Args:
-        p (Params): The parameters
-    """
     p = parse_args()
     validate_params(p)
     run_simulation(p)

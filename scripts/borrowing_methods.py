@@ -6,7 +6,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.special import betaln, expit, logit, logsumexp  # type: ignore
+from scipy.special import betaln, expit, gammaln, logit, logsumexp  # type: ignore
 from scipy.stats import norm  # type: ignore
 
 
@@ -148,6 +148,21 @@ def normal_logpdf(x: float, mean: float, var: float) -> float:
     return float(norm.logpdf(x, loc=mean, scale=math.sqrt(var)))
 
 
+def log_choose(n: int, k: int) -> float:
+    """Compute log(n choose k) stably.
+
+    Args:
+        n (int): Total items.
+        k (int): Chosen items.
+
+    Returns:
+        float: log binomial coefficient, or -inf if invalid.
+    """
+    if k < 0 or k > n:
+        return float("-inf")
+    return float(gammaln(n + 1) - gammaln(k + 1) - gammaln(n - k + 1))
+
+
 def normal_overlap_coefficient(mu1: float, sd1: float, mu2: float, sd2: float) -> float:
     """Calculate the overlap coefficient between two normal densities.
 
@@ -250,6 +265,9 @@ def pooled_estimate(arm: Any, lam: float, outcome: str) -> PosteriorSummary:
 
 def posterior_power_prior(arm: Any, outcome: str, lam: float, p: Any) -> PosteriorSummary:
     """Calculate the posterior power prior
+    References:
+        Ibrahim, J. G. and Chen, M.-H. (2000). Power prior distributions for regression models.
+            Statistical Science, 15(1): 46-50.
 
     Args:
         arm (Any): The arm
@@ -298,9 +316,7 @@ def posterior_power_prior(arm: Any, outcome: str, lam: float, p: Any) -> Posteri
     like_prec_h = lam / like_var_h
     post_prec = prec0 + like_prec_c + like_prec_h
     post_mean = (
-        prec0 * float(p.normal_prior_mean)
-        + like_prec_c * float(arm.mean_c)
-        + like_prec_h * float(arm.mean_h)
+        prec0 * float(p.normal_prior_mean) + like_prec_c * float(arm.mean_c) + like_prec_h * float(arm.mean_h)
     ) / max(post_prec, 1e-12)
     post_var = 1.0 / post_prec
     return PosteriorSummary(
@@ -313,6 +329,10 @@ def posterior_power_prior(arm: Any, outcome: str, lam: float, p: Any) -> Posteri
 
 def posterior_commensurate(arm: Any, outcome: str, tau: float) -> PosteriorSummary:
     """Calculate the posterior commensurate
+    References:
+        Hobbs, B.P., Sargent, D.J., and Carlin, B.P. (2012). Commensurate priors for incorporating
+            historical information in clinical trials using general and generalized linear models.
+            Bayesian Analysis, (3):639-674.
 
     Args:
         arm (Any): The arm
@@ -385,85 +405,12 @@ def posterior_commensurate(arm: Any, outcome: str, tau: float) -> PosteriorSumma
     )
 
 
-def posterior_map(arm: Any, outcome: str, p: Any) -> PosteriorSummary:
-    """Calculate the posterior map
-
-    Args:
-        arm (Any): The arm
-        outcome (str): The outcome
-        p (Any): The parameters
-
-    Returns:
-        PosteriorSummary: The posterior summary
-    """
-    if arm.n_h <= 0:
-        return pooled_estimate(arm, 0.0, outcome)
-
-    lambdas = np.array(p.map_lambdas, dtype=float)
-    base_weights = normalize_weights(p.map_weights, lambdas.size)
-
-    if outcome == "binary":
-        s_c = arm.succ_c
-        f_c = arm.n_c - s_c
-        s_h = arm.succ_h
-        f_h = arm.n_h - s_h
-        mean_components: list[float] = []
-        var_components: list[float] = []
-        log_post_weights: list[float] = []
-        w_components: list[float] = []
-        for idx, lam in enumerate(lambdas):
-            a_prior = p.beta_prior_alpha + lam * s_h
-            b_prior = p.beta_prior_beta + lam * f_h
-            a_post = a_prior + s_c
-            b_post = b_prior + f_c
-            total = a_post + b_post
-            mean_k = a_post / total
-            var_k = (a_post * b_post) / (total**2 * (total + 1.0))
-            log_ml = float(betaln(a_post, b_post) - betaln(a_prior, b_prior))
-            log_post_weights.append(float(np.log(float(base_weights[idx])) + log_ml))
-            mean_components.append(float(mean_k))
-            var_components.append(float(var_k))
-            w_components.append(w_from_lambda(float(lam), arm.n_c, arm.n_h))
-    else:
-        sigma2 = estimate_sigma2_continuous(arm)
-        like_var = sigma2 / arm.n_c
-        mean_components = []
-        var_components = []
-        log_post_weights = []
-        w_components = []
-        for idx, lam in enumerate(lambdas):
-            prior_mean = arm.mean_h
-            prior_var = sigma2 / (lam * arm.n_h)
-            prior_prec = 1.0 / prior_var
-            like_prec = 1.0 / like_var
-            post_var = 1.0 / (like_prec + prior_prec)
-            post_mean = post_var * (like_prec * arm.mean_c + prior_prec * prior_mean)
-            log_ml = normal_logpdf(arm.mean_c, prior_mean, like_var + prior_var)
-            log_post_weights.append(float(np.log(float(base_weights[idx])) + log_ml))
-            mean_components.append(float(post_mean))
-            var_components.append(float(post_var))
-            w_components.append(w_from_lambda(float(lam), arm.n_c, arm.n_h))
-
-    log_weights = np.array(log_post_weights, dtype=float)
-    post_weights = np.exp(log_weights - logsumexp(log_weights))
-    means = np.array(mean_components, dtype=float)
-    variances = np.array(var_components, dtype=float)
-    w_vals = np.array(w_components, dtype=float)
-    lam_vals = lambdas
-    post_mean = float(np.sum(post_weights * means))
-    post_var = float(np.sum(post_weights * (variances + means**2)) - post_mean**2)
-    lambda_eff = float(np.sum(post_weights * lam_vals))
-    w_eff = float(np.sum(post_weights * w_vals))
-    return PosteriorSummary(
-        mean=post_mean,
-        var=max(post_var, 1e-12),
-        lambda_eff=lambda_eff,
-        w_eff=w_eff,
-    )
-
-
 def posterior_rmap(arm: Any, outcome: str, p: Any, epsilon: float) -> PosteriorSummary:
     """Calculate the posterior robust map
+    References:
+        Schmidli, H., Gsteiger, S., Royschoudhury, S., O'Hagan, A., Spiegelhalter, D., and Neuenschwander, B. (2014).
+            Robust meta-analytic-predictive priors in clinical trials with historical control information. Biometrics,
+            70(4):1023-1032.
 
     Args:
         arm (Any): The arm
@@ -598,6 +545,9 @@ def posterior_rmap(arm: Any, outcome: str, p: Any, epsilon: float) -> PosteriorS
 
 def posterior_elastic(arm: Any, outcome: str, p: Any, scale: float) -> PosteriorSummary:
     """Calculate the posterior elastic
+    References:
+        Jiang, L., Nie, L., and Yuan, Y. (2023). Elastic priors to dynamically borrow information from
+            historical data in clinical trials. Biometrics, 79(1):49-60.
 
     Args:
         arm (Any): The arm
@@ -710,6 +660,9 @@ def posterior_elastic(arm: Any, outcome: str, p: Any, scale: float) -> Posterior
 
 def posterior_uip(arm: Any, outcome: str, m_units: float) -> PosteriorSummary:
     """Calculate the posterior unit-info prior
+    References:
+        Jin, H. and Yin, G. (2021). Unit information prior for adaptive information borrowing from multiple
+            historical datasets. Statistics in Medicine, 40(25):5657-5672.
 
     Args:
         arm (Any): The arm
@@ -729,7 +682,6 @@ def posterior_uip(arm: Any, outcome: str, m_units: float) -> PosteriorSummary:
 
     if outcome == "continuous":
         n_c = int(max(arm.n_c, 1))
-        n_h = int(max(arm.n_h, 1))
         mu_h = float(arm.mean_h)
         s2_h = float(max(arm.var_h, 1e-12))
         s2_c = float(max(arm.var_c, 1e-12))
@@ -781,6 +733,10 @@ def posterior_uip(arm: Any, outcome: str, m_units: float) -> PosteriorSummary:
 
 def posterior_leap(arm: Any, outcome: str, p: Any) -> PosteriorSummary:
     """Calculate the posterior leap
+    References:
+        Alt, E.M., Chang, X., Jiang, X., Liu. Q., Mo, M., Xia, H. A., and Ibrahim, J. G. (2024).
+            LEAP: The latent exchangeability prior for borrowing information from historical data.
+            Biometrics, 80(3):ujae083.
 
     Args:
         arm (Any): The arm
@@ -793,23 +749,204 @@ def posterior_leap(arm: Any, outcome: str, p: Any) -> PosteriorSummary:
     if arm.n_h <= 0:
         return pooled_estimate(arm, 0.0, outcome)
 
-    # LEAP-inspired approximation in the one-arm summary setting:
-    # let n01 be latent "sample size contribution" from historical data
-    # to the exchangeable component (Section 3 in the LEAP manuscript).
-    # We average over n01 with a (possibly truncated) Beta-Binomial prior.
+    # LEAP here is implemented as a K=2 latent-partition model:
+    # component 1 = exchangeable with current data, component 2 = non-exchangeable.
+    # This is the minimal non-degenerate LEAP setup; K=1 collapses to full pooling.
     n_c = int(max(arm.n_c, 1))
     n_h = int(max(arm.n_h, 1))
-    n01_max = min(n_h, n_c)  # avoid historical dominance when n_h > n_c
+    n01_max = min(n_h, n_c)  # optional SSC cap to avoid historical dominance
     if n01_max <= 0:
         return pooled_estimate(arm, 0.0, outcome)
 
-    # Prior on gamma1 (exchangeability probability) with mean leap_prior_omega.
     omega = float(np.clip(p.leap_prior_omega, 1e-8, 1.0 - 1e-8))
     kappa = float(max(p.leap_nex_scale, 1e-6))
     alpha_g = omega * kappa
     beta_g = (1.0 - omega) * kappa
 
-    # Exact SSC support for small n_h; sub-grid for larger n_h.
+    # Binary: exact partition-averaged LEAP via sufficient statistics.
+    # For Bernoulli likelihood with K=2 and Beta priors, partitions sharing
+    # (s01, f01) are equivalent, so we can integrate exactly without enumerating 2^n_h.
+    if outcome == "binary":
+        s_c = int(arm.succ_c)
+        f_c = int(max(arm.n_c - arm.succ_c, 0))
+        s_h = int(arm.succ_h)
+        f_h = int(max(arm.n_h - arm.succ_h, 0))
+        a0 = float(max(p.beta_prior_alpha, 1e-8))
+        b0 = float(max(p.beta_prior_beta, 1e-8))
+
+        means: list[float] = []
+        variances: list[float] = []
+        lambdas: list[float] = []
+        w_components: list[float] = []
+        log_weights: list[float] = []
+
+        for s01 in range(s_h + 1):
+            # n01 = s01 + f01 must satisfy cap n01 <= n01_max.
+            f01_hi = min(f_h, n01_max - s01)
+            if f01_hi < 0:
+                continue
+            for f01 in range(f01_hi + 1):
+                s02 = s_h - s01
+                f02 = f_h - f01
+                n01 = s01 + f01
+
+                # Number of latent allocations yielding this (s01, f01) split.
+                log_mult = log_choose(s_h, s01) + log_choose(f_h, f01)
+
+                # Integrated gamma prior term.
+                log_gamma = float(betaln(alpha_g + n01, beta_g + n_h - n01) - betaln(alpha_g, beta_g))
+
+                # Marginal likelihood terms under Beta-Bernoulli for components 1 and 2.
+                log_ml_1 = float(betaln(a0 + s_c + s01, b0 + f_c + f01) - betaln(a0, b0))
+                log_ml_2 = float(betaln(a0 + s02, b0 + f02) - betaln(a0, b0))
+
+                log_weights.append(log_mult + log_gamma + log_ml_1 + log_ml_2)
+
+                a1_post = a0 + s_c + s01
+                b1_post = b0 + f_c + f01
+                tot = a1_post + b1_post
+                mean_1 = float(a1_post / tot)
+                var_1 = float((a1_post * b1_post) / (tot * tot * (tot + 1.0)))
+
+                lam_n01 = float(n01 / max(n_h, 1))
+                means.append(mean_1)
+                variances.append(var_1)
+                lambdas.append(lam_n01)
+                w_components.append(float(w_from_lambda(lam_n01, n_c, n_h)))
+
+        if len(log_weights) == 0:
+            return pooled_estimate(arm, 0.0, outcome)
+
+        logw = np.array(log_weights, dtype=float)
+        if not np.isfinite(logw).any():
+            weights = np.full(logw.shape, 1.0 / float(logw.size), dtype=float)
+        else:
+            weights = np.exp(logw - logsumexp(logw))
+
+        means_arr = np.array(means, dtype=float)
+        vars_arr = np.array(variances, dtype=float)
+        lam_arr = np.array(lambdas, dtype=float)
+        w_arr = np.array(w_components, dtype=float)
+
+        post_mean = float(np.sum(weights * means_arr))
+        post_var = float(np.sum(weights * (vars_arr + means_arr**2)) - post_mean**2)
+        lambda_eff = float(np.sum(weights * lam_arr))
+        w_eff = float(np.sum(weights * w_arr))
+        return PosteriorSummary(mean=post_mean, var=max(post_var, 1e-12), lambda_eff=lambda_eff, w_eff=w_eff)
+
+    # Continuous:
+    # If historical individual outcomes are available, run latent-assignment MCMC
+    # (individual-level C_{0i}) for LEAP K=2.
+    y_h_raw = getattr(arm, "y_h", None)
+    if y_h_raw is not None:
+        y_h = np.asarray(y_h_raw, dtype=float).reshape(-1)
+    else:
+        y_h = np.array([], dtype=float)
+
+    if y_h.size == n_h and n_h > 0:
+        rng_seed = int(getattr(p, "seed", 12345))
+        rng = np.random.default_rng(rng_seed + 99173 + n_h + n_c)
+
+        sigma2 = float(max(estimate_sigma2_continuous(arm), 1e-8))
+        mu0 = float(p.normal_prior_mean)
+        v0 = float(max(p.normal_prior_var, 1e-10))
+        prec0 = 1.0 / v0
+
+        n_iter = int(max(getattr(p, "leap_mcmc_iters", 5000), 500))
+        burn = int(max(getattr(p, "leap_mcmc_burnin", n_iter // 2), 0))
+        thin = int(max(getattr(p, "leap_mcmc_thin", 2), 1))
+        if burn >= n_iter:
+            burn = n_iter // 2
+
+        mu_c = float(arm.mean_c)
+        dist_to_current = np.abs(y_h - mu_c)
+        init_n1 = int(np.clip(round(omega * n_h), 0, n01_max))
+        c = np.zeros(n_h, dtype=np.int8)
+        if init_n1 > 0:
+            idx = np.argsort(dist_to_current)[:init_n1]
+            c[idx] = 1
+
+        sum_y_h = float(np.sum(y_h))
+        sum_c = float(getattr(arm, "sum_c", float(arm.mean_c) * n_c))
+        n1 = int(np.sum(c))
+        sum1 = float(np.sum(y_h[c == 1])) if n1 > 0 else 0.0
+
+        theta1_samples: list[float] = []
+        lambda_samples: list[float] = []
+
+        theta1 = float(mu_c)
+        theta2 = float(getattr(arm, "mean_h", mu_c))
+        gamma1 = float(omega)
+
+        for t in range(n_iter):
+            # Sample parameters given latent assignments.
+            n2 = n_h - n1
+            sum2 = sum_y_h - sum1
+
+            prec1 = prec0 + (n_c + n1) / sigma2
+            var1 = 1.0 / max(prec1, 1e-12)
+            mean1 = var1 * (prec0 * mu0 + (sum_c + sum1) / sigma2)
+            theta1 = float(rng.normal(mean1, math.sqrt(max(var1, 1e-12))))
+
+            prec2 = prec0 + n2 / sigma2
+            var2 = 1.0 / max(prec2, 1e-12)
+            mean2 = var2 * (prec0 * mu0 + sum2 / sigma2)
+            theta2 = float(rng.normal(mean2, math.sqrt(max(var2, 1e-12))))
+
+            gamma1 = float(rng.beta(alpha_g + n1, beta_g + n_h - n1))
+
+            # Sample latent assignments C_{0i}.
+            order = rng.permutation(n_h)
+            for i in order:
+                yi = float(y_h[i])
+                old = int(c[i])
+                if old == 1:
+                    n1_without = n1 - 1
+                    sum1_without = sum1 - yi
+                else:
+                    n1_without = n1
+                    sum1_without = sum1
+
+                allow_ex = n1_without + 1 <= n01_max
+                if not allow_ex:
+                    new = 0
+                else:
+                    log_p1 = float(np.log(max(gamma1, 1e-12))) + normal_logpdf(yi, theta1, sigma2)
+                    log_p0 = float(np.log(max(1.0 - gamma1, 1e-12))) + normal_logpdf(yi, theta2, sigma2)
+                    m = max(log_p1, log_p0)
+                    p1 = float(np.exp(log_p1 - m) / (np.exp(log_p1 - m) + np.exp(log_p0 - m)))
+                    new = int(rng.random() < p1)
+
+                if new != old:
+                    if new == 1:
+                        n1 = n1_without + 1
+                        sum1 = sum1_without + yi
+                    else:
+                        n1 = n1_without
+                        sum1 = sum1_without
+                    c[i] = np.int8(new)
+
+            if t >= burn and ((t - burn) % thin == 0):
+                theta1_samples.append(theta1)
+                lambda_samples.append(float(n1 / max(n_h, 1)))
+
+        if len(theta1_samples) > 0:
+            theta_arr = np.array(theta1_samples, dtype=float)
+            lam_arr = np.array(lambda_samples, dtype=float)
+            post_mean = float(np.mean(theta_arr))
+            post_var = float(np.var(theta_arr, ddof=1)) if theta_arr.size > 1 else 1e-12
+            lambda_eff = float(np.mean(lam_arr))
+            w_eff = float(np.mean([w_from_lambda(lv, n_c, n_h) for lv in lam_arr]))
+            return PosteriorSummary(
+                mean=post_mean,
+                var=max(post_var, 1e-12),
+                lambda_eff=lambda_eff,
+                w_eff=w_eff,
+            )
+
+    # Summary-only fallback (SSC-mixture approximation).
+    # This branch keeps backward compatibility when individual historical outcomes
+    # are unavailable to represent latent allocations C_{0i}.
     if n01_max <= 80:
         n01_vals = np.arange(0, n01_max + 1, dtype=float)
     else:
@@ -819,69 +956,39 @@ def posterior_leap(arm: Any, outcome: str, p: Any) -> PosteriorSummary:
         if n01_vals[-1] != float(n01_max):
             n01_vals = np.concatenate([n01_vals, np.array([float(n01_max)])])
 
-    # Truncated Beta-Binomial prior mass on SSC support.
     log_prior = np.array(
         [
-            float(
-                math.log(math.comb(n_h, int(n01)))
-                + betaln(alpha_g + n01, beta_g + n_h - n01)
-                - betaln(alpha_g, beta_g)
-            )
+            float(log_choose(n_h, int(n01)) + betaln(alpha_g + n01, beta_g + n_h - n01) - betaln(alpha_g, beta_g))
             for n01 in n01_vals
         ],
         dtype=float,
     )
     log_prior -= logsumexp(log_prior)
 
-    if outcome == "binary":
-        s_c = int(arm.succ_c)
-        f_c = int(arm.n_c - arm.succ_c)
-        p_h = clamp_prob(float(arm.mean_h))
-        a0 = float(max(p.beta_prior_alpha, 1e-8))
-        b0 = float(max(p.beta_prior_beta, 1e-8))
+    sigma2 = estimate_sigma2_continuous(arm)
+    mu0 = float(p.normal_prior_mean)
+    v0 = float(max(p.normal_prior_var, 1e-12))
+    prec0 = 1.0 / v0
+    like_var = float(max(sigma2 / n_c, 1e-12))
+    like_prec = 1.0 / like_var
 
-        means = []
-        variances = []
-        w_components = []
-        log_ml = []
-        for n01 in n01_vals:
-            s01 = n01 * p_h
-            f01 = n01 * (1.0 - p_h)
-            a_prior = a0 + s01
-            b_prior = b0 + f01
-            a_post = a_prior + s_c
-            b_post = b_prior + f_c
-            total = a_post + b_post
-            means.append(float(a_post / total))
-            variances.append(float((a_post * b_post) / (total**2 * (total + 1.0))))
-            lam_n01 = float(n01 / n_h)
-            w_components.append(float(w_from_lambda(lam_n01, n_c, n_h)))
-            log_ml.append(float(betaln(a_post, b_post) - betaln(a_prior, b_prior)))
-    else:
-        sigma2 = estimate_sigma2_continuous(arm)
-        mu0 = float(p.normal_prior_mean)
-        v0 = float(max(p.normal_prior_var, 1e-12))
-        prec0 = 1.0 / v0
-        like_var = float(max(sigma2 / n_c, 1e-12))
-        like_prec = 1.0 / like_var
+    means = []
+    variances = []
+    w_components = []
+    log_ml = []
+    for n01 in n01_vals:
+        prech = float(max(n01 / max(sigma2, 1e-12), 0.0))
+        prior_prec = prec0 + prech
+        prior_var = 1.0 / max(prior_prec, 1e-12)
+        prior_mean = (prec0 * mu0 + prech * float(arm.mean_h)) / max(prior_prec, 1e-12)
 
-        means = []
-        variances = []
-        w_components = []
-        log_ml = []
-        for n01 in n01_vals:
-            prech = float(max(n01 / max(sigma2, 1e-12), 0.0))
-            prior_prec = prec0 + prech
-            prior_var = 1.0 / max(prior_prec, 1e-12)
-            prior_mean = (prec0 * mu0 + prech * float(arm.mean_h)) / max(prior_prec, 1e-12)
-
-            post_var = 1.0 / (like_prec + prior_prec)
-            post_mean = post_var * (like_prec * float(arm.mean_c) + prior_prec * prior_mean)
-            means.append(float(post_mean))
-            variances.append(float(post_var))
-            lam_n01 = float(n01 / n_h)
-            w_components.append(float(w_from_lambda(lam_n01, n_c, n_h)))
-            log_ml.append(float(normal_logpdf(float(arm.mean_c), prior_mean, like_var + prior_var)))
+        post_var = 1.0 / (like_prec + prior_prec)
+        post_mean = post_var * (like_prec * float(arm.mean_c) + prior_prec * prior_mean)
+        means.append(float(post_mean))
+        variances.append(float(post_var))
+        lam_n01 = float(n01 / n_h)
+        w_components.append(float(w_from_lambda(lam_n01, n_c, n_h)))
+        log_ml.append(float(normal_logpdf(float(arm.mean_c), prior_mean, like_var + prior_var)))
 
     log_post = log_prior + np.array(log_ml, dtype=float)
     if not np.isfinite(log_post).any():
@@ -901,114 +1008,11 @@ def posterior_leap(arm: Any, outcome: str, p: Any) -> PosteriorSummary:
     return PosteriorSummary(mean=post_mean, var=max(post_var, 1e-12), lambda_eff=lambda_eff, w_eff=w_eff)
 
 
-def posterior_exnex(arm: Any, outcome: str, p: Any) -> PosteriorSummary:
-    """Calculate the posterior exnex
-
-    Args:
-        arm (Any): The arm
-        outcome (str): The outcome
-        p (Any): The parameters
-
-    Returns:
-        PosteriorSummary: The posterior summary
-    """
-    if arm.n_h <= 0:
-        return pooled_estimate(arm, 0.0, outcome)
-
-    # EXNEX mixture:
-    #   p = delta * M_EX + (1-delta) * M_NEX,  delta ~ Bernoulli(pi_k)
-    # where pi_k is represented by exnex_prior_ex.
-    omega_ex = float(np.clip(p.exnex_prior_ex, 1e-8, 1.0 - 1e-8))
-
-    if outcome == "binary":
-        s_c = int(arm.succ_c)
-        f_c = int(arm.n_c - arm.succ_c)
-        s_h = int(arm.succ_h)
-        f_h = int(arm.n_h - arm.succ_h)
-
-        # EX: historical-informed prior (single-source reduction of EX component).
-        a0 = float(max(p.beta_prior_alpha, 1e-8))
-        b0 = float(max(p.beta_prior_beta, 1e-8))
-        a_ex_prior = p.beta_prior_alpha + s_h
-        b_ex_prior = p.beta_prior_beta + f_h
-        a_post_ex = a_ex_prior + s_c
-        b_post_ex = b_ex_prior + f_c
-        total_ex = a_post_ex + b_post_ex
-        mean_ex = a_post_ex / total_ex
-        var_ex = (a_post_ex * b_post_ex) / (total_ex**2 * (total_ex + 1.0))
-        post_ex = PosteriorSummary(
-            mean=float(mean_ex),
-            var=max(float(var_ex), 1e-12),
-            lambda_eff=1.0,
-            w_eff=w_from_lambda(1.0, arm.n_c, arm.n_h),
-        )
-        log_ml_ex = beta_binomial_log_marginal(s_c, f_c, a_ex_prior, b_ex_prior)
-
-        # NEX: basket-specific prior (no borrowing from supplemental source).
-        a_nex = a0
-        b_nex = b0
-        a_post_nex = a_nex + s_c
-        b_post_nex = b_nex + f_c
-        total_nex = a_post_nex + b_post_nex
-        mean_nex = a_post_nex / total_nex
-        var_nex = (a_post_nex * b_post_nex) / (total_nex**2 * (total_nex + 1.0))
-        post_nex = PosteriorSummary(
-            mean=float(mean_nex),
-            var=max(float(var_nex), 1e-12),
-            lambda_eff=0.0,
-            w_eff=0.0,
-        )
-        log_ml_nex = beta_binomial_log_marginal(s_c, f_c, a_nex, b_nex)
-    else:
-        sigma2 = estimate_sigma2_continuous(arm)
-        like_var = max(sigma2 / max(arm.n_c, 1), 1e-12)
-
-        # EX: historical-informed normal prior.
-        prior_mean_ex = arm.mean_h
-        prior_var_ex = max(sigma2 / max(arm.n_h, 1), 1e-12)
-        prior_prec_ex = 1.0 / prior_var_ex
-        like_prec = 1.0 / like_var
-        post_var_ex = 1.0 / (like_prec + prior_prec_ex)
-        post_mean_ex = post_var_ex * (like_prec * arm.mean_c + prior_prec_ex * prior_mean_ex)
-        post_ex = PosteriorSummary(
-            mean=float(post_mean_ex),
-            var=max(float(post_var_ex), 1e-12),
-            lambda_eff=1.0,
-            w_eff=w_from_lambda(1.0, arm.n_c, arm.n_h),
-        )
-        log_ml_ex = normal_logpdf(arm.mean_c, prior_mean_ex, like_var + prior_var_ex)
-
-        # NEX: basket-specific prior on current basket.
-        prior_mean_nex = p.normal_prior_mean
-        prior_var_nex = p.normal_prior_var
-        prior_prec_nex = 1.0 / max(prior_var_nex, 1e-12)
-        post_var_nex = 1.0 / (like_prec + prior_prec_nex)
-        post_mean_nex = post_var_nex * (like_prec * arm.mean_c + prior_prec_nex * prior_mean_nex)
-        post_nex = PosteriorSummary(
-            mean=float(post_mean_nex),
-            var=max(float(post_var_nex), 1e-12),
-            lambda_eff=0.0,
-            w_eff=0.0,
-        )
-        log_ml_nex = normal_logpdf(arm.mean_c, prior_mean_nex, like_var + prior_var_nex)
-
-    log_w_ex = float(np.log(omega_ex)) + log_ml_ex
-    log_w_nex = float(np.log(1.0 - omega_ex)) + log_ml_nex
-    log_ws = np.array([log_w_ex, log_w_nex], dtype=float)
-    if not np.isfinite(log_ws).any():
-        weights = np.array([0.5, 0.5], dtype=float)
-    else:
-        weights = np.exp(log_ws - logsumexp(log_ws))
-
-    mean = float(weights[0] * post_ex.mean + weights[1] * post_nex.mean)
-    var = float(weights[0] * (post_ex.var + post_ex.mean**2) + weights[1] * (post_nex.var + post_nex.mean**2) - mean**2)
-    lambda_eff = float(weights[0] * post_ex.lambda_eff + weights[1] * post_nex.lambda_eff)
-    w_eff = float(weights[0] * post_ex.w_eff + weights[1] * post_nex.w_eff)
-    return PosteriorSummary(mean=mean, var=max(var, 1e-12), lambda_eff=lambda_eff, w_eff=w_eff)
-
-
 def posterior_mem(arm: Any, outcome: str, p: Any) -> PosteriorSummary:
     """Calculate the posterior mem
+    References:
+        Kaizer, A. M., Koopmeiners, J. S., and Hobbs, B. P. (2018). Bayesian hierarchical modeling based on
+            multisource exchangeability. Biostatistics, 19(2):169-184.
 
     Args:
         arm (Any): The arm
@@ -1092,11 +1096,7 @@ def posterior_mem(arm: Any, outcome: str, p: Any) -> PosteriorSummary:
 
         # H=1 simplification of Gaussian integrated marginal likelihood.
         diff = arm.mean_c - arm.mean_h
-        log_ml_in = float(
-            0.5 * np.log(2.0 * np.pi)
-            - 0.5 * np.log(prec_c + prec_h)
-            - 0.5 * (diff**2) / (v_c + v_h)
-        )
+        log_ml_in = float(0.5 * np.log(2.0 * np.pi) - 0.5 * np.log(prec_c + prec_h) - 0.5 * (diff**2) / (v_c + v_h))
         log_ml_out = float(np.log(2.0 * np.pi) - 0.5 * np.log(prec_c * prec_h))
 
     log_w_in = float(np.log(pi_in)) + log_ml_in
@@ -1116,6 +1116,9 @@ def posterior_mem(arm: Any, outcome: str, p: Any) -> PosteriorSummary:
 
 def posterior_bhmoi(arm: Any, outcome: str, p: Any) -> PosteriorSummary:
     """Calculate the posterior bhmoi
+    References:
+        Lu, X., and Lee, J. J. (2025). Overlapping indices for dynamic information borrowing in Bayesian hierarchical
+            modeling. Journal of Computational and Graphical Statistics, pages 1-15.
 
     Args:
         arm (Any): The arm
@@ -1128,49 +1131,133 @@ def posterior_bhmoi(arm: Any, outcome: str, p: Any) -> PosteriorSummary:
     if arm.n_h <= 0:
         return pooled_estimate(arm, 0.0, outcome)
 
-    # BHMOI reduction to a two-source setting (current + one historical source):
-    # - OBI_m = average pairwise OVL within a cluster.
-    #   For cluster size n_m = 2, OBI = OVL(f_c, f_h).
-    # - OCI is used for clustering in the full BHMOI framework; with only two sources
-    #   we treat clustering as fixed and focus on OBI-driven borrowing strength.
+    # Two-source reduction of BHMOI:
+    # OBI for a cluster of size 2 is OVL(f_c, f_h), then alpha = s(OBI).
+    # Posterior is obtained from the hierarchical model with
+    #   theta_i | mu, tau ~ N(mu, 1/tau), tau ~ Gamma(alpha, beta).
+    n_c = int(max(arm.n_c, 1))
+    n_h = int(max(arm.n_h, 1))
+
     if outcome == "continuous":
-        mu_c = float(arm.mean_c)
-        mu_h = float(arm.mean_h)
-        sd_c = math.sqrt(max(var_mean_cont(arm.var_c, arm.n_c), 1e-12))
-        sd_h = math.sqrt(max(var_mean_cont(arm.var_h, arm.n_h), 1e-12))
+        y_c = float(arm.mean_c)
+        y_h = float(arm.mean_h)
+
+        sigma2_fallback = estimate_sigma2_continuous(arm)
+        if arm.n_c > 1:
+            v_c = float(max(var_mean_cont(float(arm.var_c), n_c), 1e-12))
+        else:
+            v_c = float(max(sigma2_fallback / n_c, 1e-12))
+        if arm.n_h > 1:
+            v_h = float(max(var_mean_cont(float(arm.var_h), n_h), 1e-12))
+        else:
+            v_h = float(max(sigma2_fallback / n_h, 1e-12))
     else:
-        p_c = clamp_prob((float(arm.succ_c) + 0.5) / (float(arm.n_c) + 1.0))
-        p_h = clamp_prob((float(arm.succ_h) + 0.5) / (float(arm.n_h) + 1.0))
-        mu_c = float(logit(p_c))
-        mu_h = float(logit(p_h))
-        var_c = 1.0 / max(float(arm.n_c) * p_c * (1.0 - p_c), 1e-12)
-        var_h = 1.0 / max(float(arm.n_h) * p_h * (1.0 - p_h), 1e-12)
-        sd_c = math.sqrt(max(var_c, 1e-12))
-        sd_h = math.sqrt(max(var_h, 1e-12))
+        # Approximate binomial likelihood on logit scale.
+        p_c = clamp_prob((float(arm.succ_c) + 0.5) / (float(n_c) + 1.0))
+        p_h = clamp_prob((float(arm.succ_h) + 0.5) / (float(n_h) + 1.0))
+        y_c = float(logit(p_c))
+        y_h = float(logit(p_h))
+        v_c = float(max(1.0 / (float(n_c) * p_c * (1.0 - p_c)), 1e-12))
+        v_h = float(max(1.0 / (float(n_h) * p_h * (1.0 - p_h)), 1e-12))
 
-    obi = normal_overlap_coefficient(mu_c, sd_c, mu_h, sd_h)
-    # Use the same OVL in the two-source reduction as a proxy for cluster quality.
-    oci = obi
+    obi = normal_overlap_coefficient(y_c, math.sqrt(v_c), y_h, math.sqrt(v_h))
 
-    # Borrowing map from BHMOI simulation setup:
+    # BHMOI borrowing-strength map:
     # alpha = alpha_min + k_alpha(OBI) * (alpha_max - alpha_min),
     # k_alpha(OBI) = OBI * exp(-5 * (1-OBI)).
-    # Here bhmoi_sharpness scales the damping coefficient 5.
-    damp = 5.0 * float(max(p.bhmoi_sharpness, 0.0))
-    k_alpha = float(np.clip(oci * math.exp(-damp * (1.0 - obi)), 0.0, 1.0))
+    damp = 5.0 * float(max(getattr(p, "bhmoi_sharpness", 1.0), 0.0))
+    k_alpha = float(np.clip(obi * math.exp(-damp * (1.0 - obi)), 0.0, 1.0))
     alpha_min = float(getattr(p, "bhmoi_alpha_min", 1.0))
     alpha_max = float(getattr(p, "bhmoi_alpha_max", 200.0))
     if alpha_max <= alpha_min:
         alpha_max = alpha_min + 1.0
-    alpha_borrow = alpha_min + k_alpha * (alpha_max - alpha_min)
+    alpha_tau = float(max(alpha_min + k_alpha * (alpha_max - alpha_min), 1e-8))
+    beta_tau = float(max(getattr(p, "bhmoi_tau_beta", 10.0), 1e-8))
 
-    # This framework uses lambda_eff in [0,1] as effective borrowing strength.
-    lam_eff = float(np.clip((alpha_borrow - alpha_min) / (alpha_max - alpha_min), 0.0, 1.0))
-    return pooled_estimate(arm, lam_eff, outcome)
+    # Hyperprior for cluster mean mu.
+    mu0 = float(getattr(p, "normal_prior_mean", 0.0))
+    v0 = float(max(getattr(p, "normal_prior_var", 1e8), 1e-12))
+
+    # Numerical integration over log(tau).
+    grid_size = max(int(getattr(p, "bhmoi_tau_grid_size", 401)), 11)
+    log_tau_min = float(getattr(p, "bhmoi_tau_log_min", -8.0))
+    log_tau_max = float(getattr(p, "bhmoi_tau_log_max", 8.0))
+    if log_tau_max <= log_tau_min:
+        log_tau_max = log_tau_min + 1.0
+
+    z_grid = np.linspace(log_tau_min, log_tau_max, grid_size, dtype=float)
+    tau_grid = np.exp(z_grid)
+
+    means = np.empty_like(tau_grid)
+    variances = np.empty_like(tau_grid)
+    lam_grid = np.empty_like(tau_grid)
+    log_post = np.empty_like(tau_grid)
+    prior_const = alpha_tau * math.log(beta_tau) - math.lgamma(alpha_tau)
+
+    for idx, tau in enumerate(tau_grid):
+        s_c = v_c + 1.0 / tau
+        s_h = v_h + 1.0 / tau
+
+        # mu | y, tau
+        prec_mu = 1.0 / v0 + 1.0 / s_c + 1.0 / s_h
+        var_mu = 1.0 / max(prec_mu, 1e-12)
+        mean_mu = var_mu * (mu0 / v0 + y_c / s_c + y_h / s_h)
+
+        # theta_c | y, tau
+        den_c = 1.0 + tau * v_c
+        w_mu = (tau * v_c) / den_c
+        mean_theta = (y_c + tau * v_c * mean_mu) / den_c
+        var_theta = 1.0 / (1.0 / v_c + tau) + (w_mu * w_mu) * var_mu
+
+        # p(y | tau) after integrating mu from Normal prior.
+        a = s_c + v0
+        d = s_h + v0
+        off = v0
+        det = max(a * d - off * off, 1e-12)
+        inv00 = d / det
+        inv11 = a / det
+        inv01 = -off / det
+        diff_c = y_c - mu0
+        diff_h = y_h - mu0
+        quad = inv00 * diff_c * diff_c + inv11 * diff_h * diff_h + 2.0 * inv01 * diff_c * diff_h
+        log_ml = -0.5 * (2.0 * math.log(2.0 * math.pi) + math.log(det) + quad)
+
+        log_prior_tau = prior_const + (alpha_tau - 1.0) * math.log(tau) - beta_tau * tau
+        # Change-of-variables Jacobian for d tau = exp(z) dz.
+        log_post[idx] = log_prior_tau + log_ml + z_grid[idx]
+        means[idx] = mean_theta
+        variances[idx] = max(var_theta, 1e-12)
+        lam_grid[idx] = float(np.clip((tau * v_h) / (1.0 + tau * v_h), 0.0, 1.0))
+
+    if not np.isfinite(log_post).any():
+        return pooled_estimate(arm, 0.0, outcome)
+
+    w = np.exp(log_post - logsumexp(log_post))
+    theta_mean = float(np.sum(w * means))
+    theta_var = float(np.sum(w * (variances + means * means)) - theta_mean * theta_mean)
+    lam_eff = float(np.clip(np.sum(w * lam_grid), 0.0, 1.0))
+
+    if outcome == "continuous":
+        mean = theta_mean
+        var = max(theta_var, 1e-12)
+    else:
+        mean = clamp_prob(float(expit(theta_mean)))
+        grad = mean * (1.0 - mean)
+        var = max(theta_var * grad * grad, 1e-12)
+
+    return PosteriorSummary(
+        mean=float(mean),
+        var=float(var),
+        lambda_eff=lam_eff,
+        w_eff=w_from_lambda(lam_eff, arm.n_c, arm.n_h),
+    )
 
 
 def posterior_nonpara_bayes(arm: Any, outcome: str, p: Any) -> PosteriorSummary:
     """Calculate the posterior nonpara bayes
+    References:
+        Ohigashi, T., Maruo, K., Sozu, T., and Gosho, M. (2025). Nonparametric Bayesian approach for dynamic
+            borrowing of historical control data. Biometrics, 81(3):ujaf118.
 
     Args:
         arm (Any): The arm
@@ -1183,17 +1270,21 @@ def posterior_nonpara_bayes(arm: Any, outcome: str, p: Any) -> PosteriorSummary:
     if arm.n_h <= 0:
         return pooled_estimate(arm, 0.0, outcome)
 
-    # DPM/DDPM-inspired prior co-clustering probability:
-    # - DPM-like part: P(z_CC = z_H) = 1 / (1 + M)
-    # - DDPM-like adjustment (independent stick-break components): 1 / (1 + 2M)
+    # DPM/DDPM-inspired prior co-clustering probability for one historical source:
+    #   pi0 = P(z_CC = z_H)
+    #       = {2(M+1) - M*phi} / {2(M+1)^2 + M*phi}.
+    # This is obtained from E[sum_c w_c^(H) w_c^(CC)] under the DDPM stick-breaking
+    # construction in the manuscript, and recovers:
+    #   - phi = 0 -> 1 / (1 + M)  (DPM-like)
+    #   - phi = 1 -> 1 / (1 + 2M) (independent sticks)
     raw_concentration = getattr(p, "npb_concentration", None)
     if raw_concentration is None:
         raw_concentration = getattr(p, "npb_temperature", 5.0)
-    concentration = float(max(raw_concentration, 1e-8))
+    concentration = float(max(raw_concentration if raw_concentration is not None else 5.0, 1e-8))
     phi = float(np.clip(getattr(p, "npb_phi", 0.5), 0.0, 1.0))
-    prior_same_dpm = 1.0 / (1.0 + concentration)
-    prior_same_ddpm = 1.0 / (1.0 + 2.0 * concentration)
-    prior_sbi = float(np.clip((1.0 - phi) * prior_same_dpm + phi * prior_same_ddpm, 1e-8, 1.0 - 1e-8))
+    prior_sbi_num = 2.0 * (concentration + 1.0) - concentration * phi
+    prior_sbi_den = 2.0 * (concentration + 1.0) ** 2 + concentration * phi
+    prior_sbi = float(np.clip(prior_sbi_num / max(prior_sbi_den, 1e-12), 1e-8, 1.0 - 1e-8))
 
     if outcome == "binary":
         a0 = float(max(p.beta_prior_alpha, 1e-8))
@@ -1465,7 +1556,6 @@ def build_method_specs(p: Any) -> List[MethodSpec]:
                 param=float(tau),
             )
         )
-    specs.append(MethodSpec(name="MAP prior", family="map"))
     for eps in p.rmap_epsilons:
         specs.append(
             MethodSpec(
@@ -1491,7 +1581,6 @@ def build_method_specs(p: Any) -> List[MethodSpec]:
             )
         )
     specs.append(MethodSpec(name="LEAP", family="leap"))
-    specs.append(MethodSpec(name="EXNEX", family="exnex"))
     specs.append(MethodSpec(name="MEM", family="mem"))
     specs.append(MethodSpec(name="BHMOI", family="bhmoi"))
     specs.append(MethodSpec(name="Nonpara Bayes", family="npb"))
@@ -1509,6 +1598,20 @@ def method_current(
     bond_lambda0: float = 0.0,
     bond_lambda1: float = 0.0,
 ) -> PosteriorSummary:
+    """Calculate the posterior current-only
+
+    Args:
+        arm (Any): The arm
+        outcome (str): The outcome
+        p (Any): The parameters
+        param (Optional[float]): The parameter
+        arm_index (int): The arm index
+        bond_lambda0 (float): The bond lambda0
+        bond_lambda1 (float): The bond lambda1
+
+    Returns:
+        PosteriorSummary: The posterior summary
+    """
     return pooled_estimate(arm, 0.0, outcome)
 
 
@@ -1521,6 +1624,20 @@ def method_naive_pool(
     bond_lambda0: float = 0.0,
     bond_lambda1: float = 0.0,
 ) -> PosteriorSummary:
+    """Calculate the posterior naive pooling
+
+    Args:
+        arm (Any): The arm
+        outcome (str): The outcome
+        p (Any): The parameters
+        param (Optional[float]): The parameter
+        arm_index (int): The arm index
+        bond_lambda0 (float): The bond lambda0
+        bond_lambda1 (float): The bond lambda1
+
+    Returns:
+        PosteriorSummary: The posterior summary
+    """
     return pooled_estimate(arm, 1.0, outcome)
 
 
@@ -1533,6 +1650,20 @@ def method_fixed(
     bond_lambda0: float = 0.0,
     bond_lambda1: float = 0.0,
 ) -> PosteriorSummary:
+    """Calculate the posterior fixed prior
+
+    Args:
+        arm (Any): The arm
+        outcome (str): The outcome
+        p (Any): The parameters
+        param (Optional[float]): The parameter
+        arm_index (int): The arm index
+        bond_lambda0 (float): The bond lambda0
+        bond_lambda1 (float): The bond lambda1
+
+    Returns:
+        PosteriorSummary: The posterior summary
+    """
     if param is None:
         raise ValueError("Fixed borrowing requires param.")
     return pooled_estimate(arm, float(param), outcome)
@@ -1547,6 +1678,20 @@ def method_power_prior(
     bond_lambda0: float = 0.0,
     bond_lambda1: float = 0.0,
 ) -> PosteriorSummary:
+    """Calculate the posterior power prior
+
+    Args:
+        arm (Any): The arm
+        outcome (str): The outcome
+        p (Any): The parameters
+        param (Optional[float]): The parameter
+        arm_index (int): The arm index
+        bond_lambda0 (float): The bond lambda0
+        bond_lambda1 (float): The bond lambda1
+
+    Returns:
+        PosteriorSummary: The posterior summary
+    """
     if param is None:
         raise ValueError("Power prior requires param.")
     return posterior_power_prior(arm, outcome, float(param), p)
@@ -1561,21 +1706,7 @@ def method_commensurate_prior(
     bond_lambda0: float = 0.0,
     bond_lambda1: float = 0.0,
 ) -> PosteriorSummary:
-    if param is None:
-        raise ValueError("Commensurate prior requires param.")
-    return posterior_commensurate(arm, outcome, float(param))
-
-
-def method_map_prior(
-    arm: Any,
-    outcome: str,
-    p: Any,
-    param: Optional[float] = None,
-    arm_index: int = 0,
-    bond_lambda0: float = 0.0,
-    bond_lambda1: float = 0.0,
-) -> PosteriorSummary:
-    """Calculate the posterior map
+    """Calculate the posterior commensurate prior
 
     Args:
         arm (Any): The arm
@@ -1589,7 +1720,9 @@ def method_map_prior(
     Returns:
         PosteriorSummary: The posterior summary
     """
-    return posterior_map(arm, outcome, p)
+    if param is None:
+        raise ValueError("Commensurate prior requires param.")
+    return posterior_commensurate(arm, outcome, float(param))
 
 
 def method_robust_map(
@@ -1629,6 +1762,20 @@ def method_elastic_prior(
     bond_lambda0: float = 0.0,
     bond_lambda1: float = 0.0,
 ) -> PosteriorSummary:
+    """Calculate the posterior elastic prior
+
+    Args:
+        arm (Any): The arm
+        outcome (str): The outcome
+        p (Any): The parameters
+        param (Optional[float]): The parameter
+        arm_index (int): The arm index
+        bond_lambda0 (float): The bond lambda0
+        bond_lambda1 (float): The bond lambda1
+
+    Returns:
+        PosteriorSummary: The posterior summary
+    """
     if param is None:
         raise ValueError("Elastic prior requires param.")
     return posterior_elastic(arm, outcome, p, float(param))
@@ -1643,6 +1790,20 @@ def method_unit_info_prior(
     bond_lambda0: float = 0.0,
     bond_lambda1: float = 0.0,
 ) -> PosteriorSummary:
+    """Calculate the posterior unit-information prior
+
+    Args:
+        arm (Any): The arm
+        outcome (str): The outcome
+        p (Any): The parameters
+        param (Optional[float]): The parameter
+        arm_index (int): The arm index
+        bond_lambda0 (float): The bond lambda0
+        bond_lambda1 (float): The bond lambda1
+
+    Returns:
+        PosteriorSummary: The posterior summary
+    """
     if param is None:
         raise ValueError("Unit-information prior requires param.")
     return posterior_uip(arm, outcome, float(param))
@@ -1657,19 +1818,21 @@ def method_leap(
     bond_lambda0: float = 0.0,
     bond_lambda1: float = 0.0,
 ) -> PosteriorSummary:
+    """Calculate the posterior leap
+
+    Args:
+        arm (Any): The arm
+        outcome (str): The outcome
+        p (Any): The parameters
+        param (Optional[float]): The parameter
+        arm_index (int): The arm index
+        bond_lambda0 (float): The bond lambda0
+        bond_lambda1 (float): The bond lambda1
+
+    Returns:
+        PosteriorSummary: The posterior summary
+    """
     return posterior_leap(arm, outcome, p)
-
-
-def method_exnex(
-    arm: Any,
-    outcome: str,
-    p: Any,
-    param: Optional[float] = None,
-    arm_index: int = 0,
-    bond_lambda0: float = 0.0,
-    bond_lambda1: float = 0.0,
-) -> PosteriorSummary:
-    return posterior_exnex(arm, outcome, p)
 
 
 def method_mem(
@@ -1681,6 +1844,20 @@ def method_mem(
     bond_lambda0: float = 0.0,
     bond_lambda1: float = 0.0,
 ) -> PosteriorSummary:
+    """Calculate the posterior mem
+
+    Args:
+        arm (Any): The arm
+        outcome (str): The outcome
+        p (Any): The parameters
+        param (Optional[float]): The parameter
+        arm_index (int): The arm index
+        bond_lambda0 (float): The bond lambda0
+        bond_lambda1 (float): The bond lambda1
+
+    Returns:
+        PosteriorSummary: The posterior summary
+    """
     return posterior_mem(arm, outcome, p)
 
 
@@ -1693,6 +1870,20 @@ def method_bhmoi(
     bond_lambda0: float = 0.0,
     bond_lambda1: float = 0.0,
 ) -> PosteriorSummary:
+    """Calculate the posterior bhmoi
+
+    Args:
+        arm (Any): The arm
+        outcome (str): The outcome
+        p (Any): The parameters
+        param (Optional[float]): The parameter
+        arm_index (int): The arm index
+        bond_lambda0 (float): The bond lambda0
+        bond_lambda1 (float): The bond lambda1
+
+    Returns:
+        PosteriorSummary: The posterior summary
+    """
     return posterior_bhmoi(arm, outcome, p)
 
 
@@ -1705,6 +1896,20 @@ def method_nonparametric_bayes(
     bond_lambda0: float = 0.0,
     bond_lambda1: float = 0.0,
 ) -> PosteriorSummary:
+    """Calculate the posterior nonparametric bayes
+
+    Args:
+        arm (Any): The arm
+        outcome (str): The outcome
+        p (Any): The parameters
+        param (Optional[float]): The parameter
+        arm_index (int): The arm index
+        bond_lambda0 (float): The bond lambda0
+        bond_lambda1 (float): The bond lambda1
+
+    Returns:
+        PosteriorSummary: The posterior summary
+    """
     return posterior_nonpara_bayes(arm, outcome, p)
 
 
@@ -1717,6 +1922,23 @@ def method_test_then_pool(
     bond_lambda0: float = 0.0,
     bond_lambda1: float = 0.0,
 ) -> PosteriorSummary:
+    """Calculate the test-then-pool estimate
+
+    Args:
+        arm (Any): The arm
+        outcome (str): The outcome
+        p (Any): The parameters
+        param (Optional[float]): The parameter
+        arm_index (int): The arm index
+        bond_lambda0 (float): The bond lambda0
+        bond_lambda1 (float): The bond lambda1
+
+    Raises:
+        ValueError: If the test-then-pool mode is unknown
+
+    Returns:
+        PosteriorSummary: The posterior summary
+    """
     if arm.n_h <= 0:
         return pooled_estimate(arm, 0.0, outcome)
 
@@ -1783,6 +2005,20 @@ def method_bond(
     bond_lambda0: float = 0.0,
     bond_lambda1: float = 0.0,
 ) -> PosteriorSummary:
+    """Calculate the BOND estimate
+
+    Args:
+        arm (Any): The arm
+        outcome (str): The outcome
+        p (Any): The parameters
+        param (Optional[float]): The parameter
+        arm_index (int): The arm index
+        bond_lambda0 (float): The bond lambda0
+        bond_lambda1 (float): The bond lambda1
+
+    Returns:
+        PosteriorSummary: The posterior summary
+    """
     lam = bond_lambda0 if arm_index == 0 else bond_lambda1
     return pooled_estimate(arm, lam, outcome)
 
@@ -1795,12 +2031,10 @@ METHOD_RUNNERS: Dict[str, MethodRunner] = {
     "fixed": method_fixed,
     "power_prior": method_power_prior,
     "commensurate": method_commensurate_prior,
-    "map": method_map_prior,
     "robust_map": method_robust_map,
     "elastic": method_elastic_prior,
     "uip": method_unit_info_prior,
     "leap": method_leap,
-    "exnex": method_exnex,
     "mem": method_mem,
     "bhmoi": method_bhmoi,
     "npb": method_nonparametric_bayes,
@@ -1818,6 +2052,23 @@ def estimate_arm_for_method(
     bond_lambda0: float,
     bond_lambda1: float,
 ) -> PosteriorSummary:
+    """Estimate the arm for a given method
+
+    Args:
+        method (MethodSpec): The method specification
+        arm (Any): The arm
+        outcome (str): The outcome
+        p (Any): The parameters
+        arm_index (int): The arm index
+        bond_lambda0 (float): The bond lambda0
+        bond_lambda1 (float): The bond lambda1
+
+    Raises:
+        ValueError: If the method family is unknown
+
+    Returns:
+        PosteriorSummary: The posterior summary
+    """
     runner = METHOD_RUNNERS.get(method.family)
     if runner is None:
         raise ValueError(f"Unknown method family: {method.family}")
