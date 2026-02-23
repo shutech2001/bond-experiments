@@ -5,14 +5,13 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
-os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
-
 import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib import colormaps
 from matplotlib.lines import Line2D
 
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
 matplotlib.use("Agg")
 
 
@@ -47,7 +46,14 @@ def math_label(expr: str) -> str:
 
 
 def format_method_label(method: str) -> str:
-    """Format method names for legend display with LaTeX symbols."""
+    """Format method names for legend display with LaTeX symbols.
+
+    Args:
+        method (str): The method name
+
+    Returns:
+        str: The formatted method label
+    """
     label = method
     replacements = {
         "lambda=": r"$\lambda=$",
