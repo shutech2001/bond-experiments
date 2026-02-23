@@ -820,9 +820,9 @@ def simulate_rates(
     rho1: float,
     bond_lambda0: float,
     bond_lambda1: float,
-    method_specs: list[bm.MethodSpec],
+    method_specs: List[bm.MethodSpec],
     p: Params,
-) -> tuple[Dict[str, float], BondCalibrationSummary]:
+) -> Tuple[Dict[str, float], BondCalibrationSummary]:
     """Simulate the rates
 
     Args:
@@ -839,11 +839,11 @@ def simulate_rates(
         rho1 (float): The rho1
         bond_lambda0 (float): The bond lambda0
         bond_lambda1 (float): The bond lambda1
-        method_specs (list[bm.MethodSpec]): The method specifications
+        method_specs (List[bm.MethodSpec]): The method specifications
         p (Params): The parameters
 
     Returns:
-        tuple[Dict[str, float], BondCalibrationSummary]: The rates and BOND calibration summary
+        Tuple[Dict[str, float], BondCalibrationSummary]: The rates and BOND calibration summary
     """
     dgp = DGPParams(
         p=2,
@@ -1049,7 +1049,7 @@ def simulate_gamma_task(
     n_historical: int,
     tau_null: float,
     tau_alt: float,
-    method_specs: list[bm.MethodSpec],
+    method_specs: List[bm.MethodSpec],
     p: Params,
 ) -> GammaTaskResult:
     """Simulate one gamma point (Type-I + power) for a given stage variant
@@ -1062,7 +1062,7 @@ def simulate_gamma_task(
         n_historical (int): The historical sample size
         tau_null (float): The null tau
         tau_alt (float): The alternative tau
-        method_specs (list[bm.MethodSpec]): The method specifications
+        method_specs (List[bm.MethodSpec]): The method specifications
         p (Params): The parameters
     Returns:
         GammaTaskResult: The task result
