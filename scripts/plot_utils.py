@@ -5,13 +5,14 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
+
 import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib import colormaps
 from matplotlib.lines import Line2D
 
-os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
-os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
 matplotlib.use("Agg")
 
 
@@ -45,6 +46,19 @@ def math_label(expr: str) -> str:
     return rf"$${expr}$$"
 
 
+def format_method_label(method: str) -> str:
+    """Format method names for legend display with LaTeX symbols."""
+    label = method
+    replacements = {
+        "lambda=": r"$\lambda=$",
+        "tau=": r"$\tau=$",
+        "epsilon=": r"$\epsilon=$",
+    }
+    for plain, tex in replacements.items():
+        label = label.replace(plain, tex)
+    return label
+
+
 def save_legend_pdf(
     path: Path,
     handles: List[Line2D],
@@ -67,10 +81,10 @@ def save_legend_pdf(
     height = max(2.2, 1.2 + 0.85 * math.ceil(len(labels) / ncol_eff))
     width = max(16.0, 1.8 + 3.2 * ncol_eff)
     fig_leg, ax_leg = plt.subplots(figsize=(width, height))
+    fig_leg.subplots_adjust(left=0.01, right=0.99, top=0.99, bottom=0.01)
     ax_leg.axis("off")
     ax_leg.legend(handles, labels, loc="center", ncol=ncol_eff, frameon=False, fontsize=fontsize)
-    fig_leg.tight_layout()
-    fig_leg.savefig(path, format="pdf", bbox_inches="tight")
+    fig_leg.savefig(path, format="pdf", bbox_inches="tight", pad_inches=0.01)
     plt.close(fig_leg)
 
 
@@ -116,6 +130,17 @@ def build_method_styles(method_order: List[str]) -> Dict[str, Dict[str, Any]]:
                 "linestyle": "-",
             }
         )
+    for method in method_order:
+        if method.startswith("Commensurate prior"):
+            style_map[method].update(
+                {
+                    "color": "#0072B2",
+                    "linewidth": 3.8,
+                    "markersize": 11.5,
+                    "marker": "s",
+                    "linestyle": "--",
+                }
+            )
     return style_map
 
 
@@ -176,7 +201,7 @@ def save_type1_power_figure(
         axes[0].plot(
             gamma_grid,
             [row[method] for row in type1_table],
-            label=method,
+            label=format_method_label(method),
             marker=style["marker"],
             linestyle=style["linestyle"],
             color=style["color"],
@@ -186,7 +211,7 @@ def save_type1_power_figure(
         axes[1].plot(
             gamma_grid,
             [row[method] for row in power_table],
-            label=method,
+            label=format_method_label(method),
             marker=style["marker"],
             linestyle=style["linestyle"],
             color=style["color"],
@@ -241,42 +266,77 @@ def save_lambda_figure(
     w0_vals = [row[3] for row in lambda_table]
     w1_vals = [row[4] for row in lambda_table]
 
+    style = {
+        "lambda0": {
+            "color": "#0072B2",
+            "linestyle": "-",
+            "marker": "o",
+            "linewidth": 4.0,
+            "markersize": 11.5,
+        },
+        "lambda1": {
+            "color": "#E69F00",
+            "linestyle": "--",
+            "marker": "D",
+            "linewidth": 3.8,
+            "markersize": 11.0,
+        },
+        "w0": {
+            "color": "#009E73",
+            "linestyle": "-.",
+            "marker": "s",
+            "linewidth": 3.6,
+            "markersize": 10.8,
+        },
+        "w1": {
+            "color": "#CC79A7",
+            "linestyle": ":",
+            "marker": "^",
+            "linewidth": 3.6,
+            "markersize": 10.8,
+        },
+    }
+
     ax.plot(
         gammas,
         lam0_vals,
-        marker="o",
-        linestyle="-",
-        linewidth=4.0,
-        markersize=11.5,
+        marker=style["lambda0"]["marker"],
+        linestyle=style["lambda0"]["linestyle"],
+        color=style["lambda0"]["color"],
+        linewidth=style["lambda0"]["linewidth"],
+        markersize=style["lambda0"]["markersize"],
         label=math_label("\\lambda_0^*"),
     )
     if hist_arms == "both":
         ax.plot(
             gammas,
             lam1_vals,
-            marker="D",
-            linestyle="--",
-            linewidth=3.8,
-            markersize=11.0,
+            marker=style["lambda1"]["marker"],
+            linestyle=style["lambda1"]["linestyle"],
+            color=style["lambda1"]["color"],
+            linewidth=style["lambda1"]["linewidth"],
+            markersize=style["lambda1"]["markersize"],
             label=math_label("\\lambda_1^*"),
         )
     ax.plot(
         gammas,
         w0_vals,
-        marker="s",
-        linestyle="-.",
-        linewidth=3.6,
-        markersize=10.8,
+        marker=style["w0"]["marker"],
+        linestyle=style["w0"]["linestyle"],
+        color=style["w0"]["color"],
+        linewidth=style["w0"]["linewidth"],
+        markersize=style["w0"]["markersize"],
         label=math_label("w_0(\\lambda^*)"),
     )
     if hist_arms == "both":
         ax.plot(
             gammas,
             w1_vals,
-            marker="^",
-            linestyle=":",
-            linewidth=3.6,
-            markersize=10.8,
+            marker=style["w1"]["marker"],
+            linestyle=style["w1"]["linestyle"],
+            color=style["w1"]["color"],
+            linewidth=style["w1"]["linewidth"],
+            markersize=style["w1"]["markersize"],
             label=math_label("w_1(\\lambda^*)"),
         )
     ax.set_xlabel(math_label("\\gamma"))

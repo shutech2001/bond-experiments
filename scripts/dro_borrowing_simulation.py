@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Tuple
@@ -101,6 +102,53 @@ class ArmSummary:
 
 
 @dataclass(frozen=True)
+class BondCalibrationSummary:
+    lambda0_mean: float
+    lambda1_mean: float
+    w0_mean: float
+    w1_mean: float
+    kappa_mean: float
+
+
+class ProgressBar:
+    """Simple terminal progress bar without external dependencies."""
+
+    def __init__(self, total: int, enabled: bool = True, width: int = 32) -> None:
+        self.total = max(int(total), 1)
+        self.enabled = bool(enabled)
+        self.width = max(int(width), 10)
+        self.count = 0
+        self._is_tty = bool(getattr(sys.stderr, "isatty", lambda: False)())
+        self._last_plain_pct = -1
+        if self.enabled:
+            self._render("")
+
+    def _render(self, suffix: str) -> None:
+        ratio = float(self.count) / float(self.total)
+        ratio = min(max(ratio, 0.0), 1.0)
+        pct = int(round(ratio * 100.0))
+        if self._is_tty:
+            filled = int(round(ratio * self.width))
+            bar = "#" * filled + "-" * (self.width - filled)
+            msg = f"\r[{bar}] {self.count}/{self.total} ({pct:3d}%) {suffix}"
+            print(msg, end="", file=sys.stderr, flush=True)
+            return
+        if pct >= self._last_plain_pct + 5 or self.count >= self.total:
+            self._last_plain_pct = pct
+            print(f"[{pct:3d}%] {self.count}/{self.total} {suffix}", file=sys.stderr, flush=True)
+
+    def update(self, step: int = 1, suffix: str = "") -> None:
+        if not self.enabled:
+            return
+        self.count = min(self.total, self.count + max(int(step), 0))
+        self._render(suffix)
+
+    def close(self) -> None:
+        if self.enabled and self._is_tty:
+            print(file=sys.stderr, flush=True)
+
+
+@dataclass(frozen=True)
 class Params:
     seed: int
     outdir: Path
@@ -116,6 +164,7 @@ class Params:
     stages: list[str]
     rho_multipliers: list[float]
     lambda_grid: int
+    bond_calibration_mode: str
     fixed_lambdas: list[float]
     mc_moments: int
     alpha_pool: float
@@ -132,6 +181,8 @@ class Params:
     mem_prior_inclusion: float
     mem_tau: float
     bhmoi_sharpness: float
+    npb_concentration: float | None
+    npb_phi: float
     npb_temperature: float
     npb_sharpness: float
     beta_prior_alpha: float
@@ -141,6 +192,7 @@ class Params:
     normal_prior_mean: float
     normal_prior_var: float
     vague_normal_var: float
+    show_progress: bool
 
 
 def parse_args() -> Params:
@@ -190,6 +242,13 @@ def parse_args() -> Params:
         help="Optional comma-separated multipliers for data-driven rho (e.g., 1,1.5,2).",
     )
     parser.add_argument("--lambda-grid", type=int, default=401)
+    parser.add_argument(
+        "--bond-calibration-mode",
+        type=str,
+        default="replicate",
+        choices=("design", "replicate"),
+        help="How BOND lambdas are calibrated: once per gamma design point, or per simulated replicate.",
+    )
     parser.add_argument("--fixed-lambdas", type=str, default="0.25,0.5,0.75")
     parser.add_argument("--mc-moments", type=int, default=20000)
     parser.add_argument("--alpha-pool", type=float, default=0.1)
@@ -245,7 +304,7 @@ def parse_args() -> Params:
         "--leap-nex-scale",
         type=float,
         default=9.0,
-        help="Variance inflation factor for LEAP non-exchangeable component (>0).",
+        help="Concentration for LEAP prior exchangeability Beta distribution (>0).",
     )
     parser.add_argument(
         "--exnex-prior-ex",
@@ -272,16 +331,31 @@ def parse_args() -> Params:
         help="Sharpness exponent for BHMOI overlap index (>=0).",
     )
     parser.add_argument(
+        "--npb-concentration",
+        type=float,
+        default=None,
+        help=(
+            "Concentration parameter M for nonparametric-Bayes (DPM/DDPM-inspired). "
+            "If omitted, falls back to --npb-temperature for backward compatibility."
+        ),
+    )
+    parser.add_argument(
+        "--npb-phi",
+        type=float,
+        default=0.5,
+        help="DDPM dependence parameter phi in [0,1] for nonparametric-Bayes.",
+    )
+    parser.add_argument(
         "--npb-temperature",
         type=float,
         default=1.0,
-        help="Temperature for nonparametric-Bayes similarity mapping (>0).",
+        help="Legacy fallback for nonparametric-Bayes concentration M (>0).",
     )
     parser.add_argument(
         "--npb-sharpness",
         type=float,
         default=1.0,
-        help="Sharpness exponent for nonparametric-Bayes borrowing (>=0).",
+        help="Legacy parameter (kept for backward compatibility).",
     )
     parser.add_argument("--beta-prior-alpha", type=float, default=1.0)
     parser.add_argument("--beta-prior-beta", type=float, default=1.0)
@@ -290,6 +364,11 @@ def parse_args() -> Params:
     parser.add_argument("--normal-prior-mean", type=float, default=0.0)
     parser.add_argument("--normal-prior-var", type=float, default=1e8)
     parser.add_argument("--vague-normal-var", type=float, default=1e8)
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Disable progress bar output.",
+    )
     args = parser.parse_args()
     n_h_grid = su.parse_int_list(args.n_historical_grid) if args.n_historical_grid.strip() else [args.n_historical]
     rho_mults = su.parse_float_list(args.rho_multipliers) if args.rho_multipliers.strip() else [args.rho_multiplier]
@@ -309,6 +388,7 @@ def parse_args() -> Params:
         stages=[x.strip() for x in args.stages.split(",") if x.strip()],
         rho_multipliers=rho_mults,
         lambda_grid=args.lambda_grid,
+        bond_calibration_mode=args.bond_calibration_mode,
         fixed_lambdas=su.parse_float_list(args.fixed_lambdas),
         mc_moments=args.mc_moments,
         alpha_pool=args.alpha_pool,
@@ -325,6 +405,8 @@ def parse_args() -> Params:
         mem_prior_inclusion=args.mem_prior_inclusion,
         mem_tau=args.mem_tau,
         bhmoi_sharpness=args.bhmoi_sharpness,
+        npb_concentration=args.npb_concentration,
+        npb_phi=args.npb_phi,
         npb_temperature=args.npb_temperature,
         npb_sharpness=args.npb_sharpness,
         beta_prior_alpha=args.beta_prior_alpha,
@@ -334,6 +416,7 @@ def parse_args() -> Params:
         normal_prior_mean=args.normal_prior_mean,
         normal_prior_var=args.normal_prior_var,
         vague_normal_var=args.vague_normal_var,
+        show_progress=not bool(args.no_progress),
     )
 
 
@@ -352,6 +435,8 @@ def validate_params(p: Params) -> None:
         raise ValueError("rho multipliers must be > 0")
     if p.lambda_grid < 11:
         raise ValueError("lambda-grid must be >= 11")
+    if p.bond_calibration_mode not in {"design", "replicate"}:
+        raise ValueError("bond-calibration-mode must be either 'design' or 'replicate'")
     if any(lam < 0.0 or lam > 1.0 for lam in p.fixed_lambdas):
         raise ValueError("fixed-lambdas must be in [0,1]")
     if any(lam < 0.0 or lam > 1.0 for lam in p.power_prior_lambdas):
@@ -385,6 +470,10 @@ def validate_params(p: Params) -> None:
         raise ValueError("mem-tau must be > 0")
     if p.bhmoi_sharpness < 0.0:
         raise ValueError("bhmoi-sharpness must be >= 0")
+    if p.npb_concentration is not None and p.npb_concentration <= 0.0:
+        raise ValueError("npb-concentration must be > 0 when provided")
+    if not (0.0 <= p.npb_phi <= 1.0):
+        raise ValueError("npb-phi must be in [0,1]")
     if p.npb_temperature <= 0.0:
         raise ValueError("npb-temperature must be > 0")
     if p.npb_sharpness < 0.0:
@@ -673,7 +762,7 @@ def simulate_rates(
     bond_lambda1: float,
     method_specs: list[bm.MethodSpec],
     p: Params,
-) -> Dict[str, float]:
+) -> tuple[Dict[str, float], BondCalibrationSummary]:
     """Simulate the rates
 
     Args:
@@ -694,7 +783,7 @@ def simulate_rates(
         p (Params): The parameters
 
     Returns:
-        Dict[str, float]: The rates
+        tuple[Dict[str, float], BondCalibrationSummary]: The rates and BOND calibration summary
     """
     dgp = DGPParams(
         p=2,
@@ -715,7 +804,20 @@ def simulate_rates(
     counts = {name: 0 for name in methods}
 
     if m <= 0:
-        return {method: 0.0 for method in methods}
+        return {method: 0.0 for method in methods}, BondCalibrationSummary(
+            lambda0_mean=0.0,
+            lambda1_mean=0.0,
+            w0_mean=0.0,
+            w1_mean=0.0,
+            kappa_mean=float("nan"),
+        )
+
+    lam0_sum = 0.0
+    lam1_sum = 0.0
+    w0_sum = 0.0
+    w1_sum = 0.0
+    kappa_sum = 0.0
+    kappa_count = 0
 
     for _ in range(m):
         a_c, y_c = simulate_trial(
@@ -757,6 +859,60 @@ def simulate_rates(
         arm0 = build_arm_summary(y_c0, y_h0, outcome)
         arm1 = build_arm_summary(y_c1, y_h1, outcome)
 
+        if p.bond_calibration_mode == "replicate":
+            bond_lambda0_rep, bond_lambda1_rep, bond_kappa_rep = bm.bond_lambda_star(
+                outcome=outcome,
+                rho0=rho0,
+                rho1=rho1,
+                theta1=p.theta1,
+                mu_c0=arm0.mean_c,
+                mu_c1=arm1.mean_c,
+                var_c0=arm0.var_c,
+                var_c1=arm1.var_c,
+                var_h0=arm0.var_h,
+                var_h1=arm1.var_h,
+                n_c0=arm0.n_c,
+                n_c1=arm1.n_c,
+                n_h0=arm0.n_h,
+                n_h1=arm1.n_h,
+                grid=p.lambda_grid,
+            )
+        else:
+            bond_lambda0_rep = bond_lambda0
+            bond_lambda1_rep = bond_lambda1
+            w0_tmp = bm.w_from_lambda(bond_lambda0_rep, arm0.n_c, arm0.n_h)
+            w1_tmp = bm.w_from_lambda(bond_lambda1_rep, arm1.n_c, arm1.n_h)
+            s2_tmp = (
+                (1.0 - w1_tmp) ** 2 * (arm1.var_c / max(arm1.n_c, 1))
+                + w1_tmp**2 * (arm1.var_h / max(arm1.n_h, 1) if arm1.n_h > 0 else 0.0)
+                + (1.0 - w0_tmp) ** 2 * (arm0.var_c / max(arm0.n_c, 1))
+                + w0_tmp**2 * (arm0.var_h / max(arm0.n_h, 1) if arm0.n_h > 0 else 0.0)
+            )
+            if s2_tmp > 0.0:
+                bond_kappa_rep = bm.bond_kappa(
+                    outcome=outcome,
+                    theta1=p.theta1,
+                    w0=w0_tmp,
+                    w1=w1_tmp,
+                    rho0=rho0,
+                    rho1=rho1,
+                    mu_c0=arm0.mean_c,
+                    mu_c1=arm1.mean_c,
+                    s=float(math.sqrt(s2_tmp)),
+                )
+            else:
+                bond_kappa_rep = float("nan")
+
+        bond_w0_rep = bm.w_from_lambda(bond_lambda0_rep, arm0.n_c, arm0.n_h)
+        bond_w1_rep = bm.w_from_lambda(bond_lambda1_rep, arm1.n_c, arm1.n_h)
+        lam0_sum += float(bond_lambda0_rep)
+        lam1_sum += float(bond_lambda1_rep)
+        w0_sum += float(bond_w0_rep)
+        w1_sum += float(bond_w1_rep)
+        if np.isfinite(bond_kappa_rep):
+            kappa_sum += float(bond_kappa_rep)
+            kappa_count += 1
+
         for method in method_specs:
             est0 = bm.estimate_arm_for_method(
                 method=method,
@@ -764,8 +920,8 @@ def simulate_rates(
                 outcome=outcome,
                 p=p,
                 arm_index=0,
-                bond_lambda0=bond_lambda0,
-                bond_lambda1=bond_lambda1,
+                bond_lambda0=bond_lambda0_rep,
+                bond_lambda1=bond_lambda1_rep,
             )
             est1 = bm.estimate_arm_for_method(
                 method=method,
@@ -773,8 +929,8 @@ def simulate_rates(
                 outcome=outcome,
                 p=p,
                 arm_index=1,
-                bond_lambda0=bond_lambda0,
-                bond_lambda1=bond_lambda1,
+                bond_lambda0=bond_lambda0_rep,
+                bond_lambda1=bond_lambda1_rep,
             )
 
             theta_hat = est1.mean - est0.mean
@@ -800,7 +956,15 @@ def simulate_rates(
             if stat >= z:
                 counts[method.name] += 1
 
-    return {method: counts[method] / m for method in methods}
+    kappa_mean = float(kappa_sum / kappa_count) if kappa_count > 0 else float("nan")
+    summary = BondCalibrationSummary(
+        lambda0_mean=float(lam0_sum / m),
+        lambda1_mean=float(lam1_sum / m),
+        w0_mean=float(w0_sum / m),
+        w1_mean=float(w1_sum / m),
+        kappa_mean=kappa_mean,
+    )
+    return {method: counts[method] / m for method in methods}, summary
 
 
 def run_simulation(p: Params) -> None:
@@ -832,100 +996,93 @@ def run_simulation(p: Params) -> None:
     style_map = pu.build_method_styles(method_order)
     focus_methods = pu.select_focus_methods(method_order)
 
-    for n_historical in p.n_historical_grid:
-        for outcome in p.outcomes:
-            for scen_key in p.scenarios:
-                scenario = SCENARIOS[scen_key]
-                eta_scenario, _, _, _ = scenario_params(scenario, dgp)
+    def stage_variant_count(stage: str) -> int:
+        if stage == "oracle":
+            return 1
+        if stage == "data":
+            return len(p.rho_multipliers)
+        raise ValueError(f"Unknown stage: {stage}")
 
-                if outcome == "binary":
-                    tau_null = su.calibrate_binary_tau(
-                        beta0=dgp.beta0_bin,
-                        beta=dgp.beta,
-                        eta=eta_scenario,
-                        theta_target=0.0,
-                        p_dim=dgp.p,
-                        mc_size=max(40000, p.mc_moments),
-                        seed=p.seed + 9000 + 17 * n_historical + len(scen_key),
-                    )
-                    tau_alt = su.calibrate_binary_tau(
-                        beta0=dgp.beta0_bin,
-                        beta=dgp.beta,
-                        eta=eta_scenario,
-                        theta_target=p.theta1,
-                        p_dim=dgp.p,
-                        mc_size=max(40000, p.mc_moments),
-                        seed=p.seed + 9500 + 17 * n_historical + len(scen_key),
-                    )
-                else:
-                    tau_null = 0.0
-                    tau_alt = p.theta1
-
-                # Precompute design moments for each gamma.
-                design_moments_null: dict[float, Moments] = {}
-                design_moments_alt: dict[float, Moments] = {}
-                w1_map_null: dict[float, tuple[float, float]] = {}
-
-                for gamma in p.gamma_grid:
-                    seed = p.seed + int(1000 * gamma) + (0 if outcome == "continuous" else 7)
-                    if outcome == "continuous":
-                        moments_null = estimate_moments_continuous(scenario, dgp, gamma, tau=tau_null)
-                        moments_alt = estimate_moments_continuous(scenario, dgp, gamma, tau=tau_alt)
-                        w1_c0, w1_c1 = estimate_w1_continuous(
-                            scenario, dgp, gamma, tau=tau_null, mc_size=p.mc_moments, seed=seed
-                        )
-                    else:
-                        moments_null = estimate_moments_binary(
-                            scenario,
-                            dgp,
-                            gamma,
-                            tau=tau_null,
-                            mc_size=p.mc_moments,
-                            seed=seed,
-                        )
-                        moments_alt = estimate_moments_binary(
-                            scenario,
-                            dgp,
-                            gamma,
-                            tau=tau_alt,
-                            mc_size=p.mc_moments,
-                            seed=seed + 101,
-                        )
-                        w1_c0 = abs(moments_null.mu_h0 - moments_null.mu_c0)
-                        w1_c1 = abs(moments_null.mu_h1 - moments_null.mu_c1)
-
-                    if gamma == 0.0:
-                        w1_c0 = 0.0
-                        w1_c1 = 0.0
-
-                    design_moments_null[gamma] = moments_null
-                    design_moments_alt[gamma] = moments_alt
-                    w1_map_null[gamma] = (w1_c0, w1_c1)
-
+    total_steps = 0
+    for _ in p.n_historical_grid:
+        for _ in p.outcomes:
+            for _ in p.scenarios:
                 for stage in p.stages:
-                    if stage == "oracle":
-                        stage_variants: list[tuple[str, float | None]] = [("oracle", None)]
-                    elif stage == "data":
-                        stage_variants = [(f"data_c{c:g}", c) for c in p.rho_multipliers]
+                    total_steps += stage_variant_count(stage) * len(p.gamma_grid)
+    progress = ProgressBar(total=total_steps, enabled=p.show_progress)
+
+    try:
+        for n_historical in p.n_historical_grid:
+            for outcome in p.outcomes:
+                for scen_key in p.scenarios:
+                    scenario = SCENARIOS[scen_key]
+                    eta_scenario, _, _, _ = scenario_params(scenario, dgp)
+
+                    if outcome == "binary":
+                        tau_null = su.calibrate_binary_tau(
+                            beta0=dgp.beta0_bin,
+                            beta=dgp.beta,
+                            eta=eta_scenario,
+                            theta_target=0.0,
+                            p_dim=dgp.p,
+                            mc_size=max(40000, p.mc_moments),
+                            seed=p.seed + 9000 + 17 * n_historical + len(scen_key),
+                        )
+                        tau_alt = su.calibrate_binary_tau(
+                            beta0=dgp.beta0_bin,
+                            beta=dgp.beta,
+                            eta=eta_scenario,
+                            theta_target=p.theta1,
+                            p_dim=dgp.p,
+                            mc_size=max(40000, p.mc_moments),
+                            seed=p.seed + 9500 + 17 * n_historical + len(scen_key),
+                        )
                     else:
-                        raise ValueError(f"Unknown stage: {stage}")
+                        tau_null = 0.0
+                        tau_alt = p.theta1
 
-                    for stage_name, rho_multiplier in stage_variants:
-                        type1_table: list[dict[str, float]] = []
-                        power_table: list[dict[str, float]] = []
-                        lambda_table: list[tuple[float, float, float, float, float, float]] = []
+                    # Precompute design moments for each gamma.
+                    design_moments_null: dict[float, Moments] = {}
+                    w1_map_null: dict[float, tuple[float, float]] = {}
 
-                        for gamma in p.gamma_grid:
-                            moments_null = design_moments_null[gamma]
-                            moments_alt = design_moments_alt[gamma]
-                            if stage_name == "oracle":
-                                rho0 = abs(moments_null.mu_h0 - moments_null.mu_c0)
-                                rho1 = abs(moments_null.mu_h1 - moments_null.mu_c1)
-                            else:
-                                w1_c0, w1_c1 = w1_map_null[gamma]
-                                assert rho_multiplier is not None
-                                rho0 = rho_multiplier * w1_c0
-                                rho1 = rho_multiplier * w1_c1
+                    for gamma in p.gamma_grid:
+                        seed = p.seed + int(1000 * gamma) + (0 if outcome == "continuous" else 7)
+                        if outcome == "continuous":
+                            moments_null = estimate_moments_continuous(scenario, dgp, gamma, tau=tau_null)
+                            w1_c0, w1_c1 = estimate_w1_continuous(
+                                scenario, dgp, gamma, tau=tau_null, mc_size=p.mc_moments, seed=seed
+                            )
+                        else:
+                            moments_null = estimate_moments_binary(
+                                scenario,
+                                dgp,
+                                gamma,
+                                tau=tau_null,
+                                mc_size=p.mc_moments,
+                                seed=seed,
+                            )
+                            w1_c0 = abs(moments_null.mu_h0 - moments_null.mu_c0)
+                            w1_c1 = abs(moments_null.mu_h1 - moments_null.mu_c1)
+
+                        if gamma == 0.0:
+                            w1_c0 = 0.0
+                            w1_c1 = 0.0
+
+                        design_moments_null[gamma] = moments_null
+                        w1_map_null[gamma] = (w1_c0, w1_c1)
+
+                    for stage in p.stages:
+                        if stage == "oracle":
+                            stage_variants: list[tuple[str, float | None]] = [("oracle", None)]
+                        elif stage == "data":
+                            stage_variants = [(f"data_c{c:g}", c) for c in p.rho_multipliers]
+                        else:
+                            raise ValueError(f"Unknown stage: {stage}")
+
+                        for stage_name, rho_multiplier in stage_variants:
+                            type1_table: list[dict[str, float]] = []
+                            power_table: list[dict[str, float]] = []
+                            lambda_table: list[tuple[float, float, float, float, float, float]] = []
 
                             n_c0 = p.n_current // 2
                             n_c1 = p.n_current - n_c0
@@ -936,86 +1093,90 @@ def run_simulation(p: Params) -> None:
                                 n_h0 = n_historical
                                 n_h1 = 0
 
-                            bond_lam0, bond_lam1, bond_kappa_val = bm.bond_lambda_star(
-                                outcome=outcome,
-                                rho0=rho0,
-                                rho1=rho1,
-                                theta1=p.theta1,
-                                mu_c0=moments_alt.mu_c0,
-                                mu_c1=moments_alt.mu_c1,
-                                var_c0=moments_alt.var_c0,
-                                var_c1=moments_alt.var_c1,
-                                var_h0=moments_alt.var_h0,
-                                var_h1=moments_alt.var_h1,
-                                n_c0=n_c0,
-                                n_c1=n_c1,
-                                n_h0=n_h0,
-                                n_h1=n_h1,
-                                grid=p.lambda_grid,
-                            )
+                            for gamma in p.gamma_grid:
+                                moments_null = design_moments_null[gamma]
+                                if stage_name == "oracle":
+                                    rho0 = abs(moments_null.mu_h0 - moments_null.mu_c0)
+                                    rho1 = abs(moments_null.mu_h1 - moments_null.mu_c1)
+                                else:
+                                    w1_c0, w1_c1 = w1_map_null[gamma]
+                                    assert rho_multiplier is not None
+                                    rho0 = rho_multiplier * w1_c0
+                                    rho1 = rho_multiplier * w1_c1
 
-                            type1 = simulate_rates(
-                                rng=rng,
-                                outcome=outcome,
-                                scenario=scenario,
-                                gamma=gamma,
-                                n_current=p.n_current,
-                                n_historical=n_historical,
-                                tau_effect=tau_null,
-                                m=p.m_type1,
-                                alpha=p.alpha,
-                                rho0=rho0,
-                                rho1=rho1,
-                                bond_lambda0=bond_lam0,
-                                bond_lambda1=bond_lam1,
-                                method_specs=method_specs,
-                                p=p,
-                            )
-                            power = simulate_rates(
-                                rng=rng,
-                                outcome=outcome,
-                                scenario=scenario,
-                                gamma=gamma,
-                                n_current=p.n_current,
-                                n_historical=n_historical,
-                                tau_effect=tau_alt,
-                                m=p.m_power,
-                                alpha=p.alpha,
-                                rho0=rho0,
-                                rho1=rho1,
-                                bond_lambda0=bond_lam0,
-                                bond_lambda1=bond_lam1,
-                                method_specs=method_specs,
-                                p=p,
-                            )
+                                if p.bond_calibration_mode == "design":
+                                    bond_lam0, bond_lam1, bond_kappa_val = bm.bond_lambda_star(
+                                        outcome=outcome,
+                                        rho0=rho0,
+                                        rho1=rho1,
+                                        theta1=p.theta1,
+                                        mu_c0=moments_null.mu_c0,
+                                        mu_c1=moments_null.mu_c1,
+                                        var_c0=moments_null.var_c0,
+                                        var_c1=moments_null.var_c1,
+                                        var_h0=moments_null.var_h0,
+                                        var_h1=moments_null.var_h1,
+                                        n_c0=n_c0,
+                                        n_c1=n_c1,
+                                        n_h0=n_h0,
+                                        n_h1=n_h1,
+                                        grid=p.lambda_grid,
+                                    )
+                                else:
+                                    bond_lam0 = 0.0
+                                    bond_lam1 = 0.0
+                                    bond_kappa_val = float("nan")
 
-                            type1_table.append(type1)
-                            power_table.append(power)
-
-                            w0 = bm.w_from_lambda(bond_lam0, n_c0, n_h0)
-                            w1 = bm.w_from_lambda(bond_lam1, n_c1, n_h1)
-                            lambda_table.append((gamma, bond_lam0, bond_lam1, w0, w1, bond_kappa_val))
-                            lambda_rows.append(
-                                ",".join(
-                                    [
-                                        str(n_historical),
-                                        outcome,
-                                        scenario.key,
-                                        stage_name,
-                                        f"{gamma:.4f}",
-                                        f"{rho0:.6f}",
-                                        f"{rho1:.6f}",
-                                        f"{bond_lam0:.6f}",
-                                        f"{bond_lam1:.6f}",
-                                        f"{w0:.6f}",
-                                        f"{w1:.6f}",
-                                        f"{bond_kappa_val:.6f}",
-                                    ]
+                                type1, type1_bond = simulate_rates(
+                                    rng=rng,
+                                    outcome=outcome,
+                                    scenario=scenario,
+                                    gamma=gamma,
+                                    n_current=p.n_current,
+                                    n_historical=n_historical,
+                                    tau_effect=tau_null,
+                                    m=p.m_type1,
+                                    alpha=p.alpha,
+                                    rho0=rho0,
+                                    rho1=rho1,
+                                    bond_lambda0=bond_lam0,
+                                    bond_lambda1=bond_lam1,
+                                    method_specs=method_specs,
+                                    p=p,
                                 )
-                            )
+                                power, _ = simulate_rates(
+                                    rng=rng,
+                                    outcome=outcome,
+                                    scenario=scenario,
+                                    gamma=gamma,
+                                    n_current=p.n_current,
+                                    n_historical=n_historical,
+                                    tau_effect=tau_alt,
+                                    m=p.m_power,
+                                    alpha=p.alpha,
+                                    rho0=rho0,
+                                    rho1=rho1,
+                                    bond_lambda0=bond_lam0,
+                                    bond_lambda1=bond_lam1,
+                                    method_specs=method_specs,
+                                    p=p,
+                                )
 
-                            for method in type1.keys():
-                                results_rows.append(
+                                type1_table.append(type1)
+                                power_table.append(power)
+
+                                if p.bond_calibration_mode == "replicate":
+                                    bond_lam0 = type1_bond.lambda0_mean
+                                    bond_lam1 = type1_bond.lambda1_mean
+                                    w0 = type1_bond.w0_mean
+                                    w1 = type1_bond.w1_mean
+                                    bond_kappa_val = type1_bond.kappa_mean
+                                else:
+                                    w0 = bm.w_from_lambda(bond_lam0, n_c0, n_h0)
+                                    w1 = bm.w_from_lambda(bond_lam1, n_c1, n_h1)
+
+                                lambda_table.append((gamma, bond_lam0, bond_lam1, w0, w1, bond_kappa_val))
+                                lambda_rows.append(
                                     ",".join(
                                         [
                                             str(n_historical),
@@ -1023,72 +1184,101 @@ def run_simulation(p: Params) -> None:
                                             scenario.key,
                                             stage_name,
                                             f"{gamma:.4f}",
-                                            method,
-                                            f"{type1[method]:.6f}",
-                                            f"{power[method]:.6f}",
+                                            f"{rho0:.6f}",
+                                            f"{rho1:.6f}",
+                                            f"{bond_lam0:.6f}",
+                                            f"{bond_lam1:.6f}",
+                                            f"{w0:.6f}",
+                                            f"{w1:.6f}",
+                                            f"{bond_kappa_val:.6f}",
                                         ]
                                     )
                                 )
 
-                        methods = type1_table[0].keys()
-                        for method in methods:
-                            max_type1 = max(row[method] for row in type1_table)
-                            min_power = min(row[method] for row in power_table)
-                            worst_rows.append(
-                                ",".join(
-                                    [
-                                        str(n_historical),
-                                        outcome,
-                                        scenario.key,
-                                        stage_name,
-                                        method,
-                                        f"{max_type1:.6f}",
-                                        f"{min_power:.6f}",
-                                    ]
+                                for method in type1.keys():
+                                    results_rows.append(
+                                        ",".join(
+                                            [
+                                                str(n_historical),
+                                                outcome,
+                                                scenario.key,
+                                                stage_name,
+                                                f"{gamma:.4f}",
+                                                method,
+                                                f"{type1[method]:.6f}",
+                                                f"{power[method]:.6f}",
+                                            ]
+                                        )
+                                    )
+                                progress.update(
+                                    1,
+                                    (
+                                        f"nH={n_historical} | {outcome} | {scenario.key} | "
+                                        f"{stage_name} | gamma={gamma:g}"
+                                    ),
                                 )
+
+                            methods = type1_table[0].keys()
+                            for method in methods:
+                                max_type1 = max(row[method] for row in type1_table)
+                                min_power = min(row[method] for row in power_table)
+                                worst_rows.append(
+                                    ",".join(
+                                        [
+                                            str(n_historical),
+                                            outcome,
+                                            scenario.key,
+                                            stage_name,
+                                            method,
+                                            f"{max_type1:.6f}",
+                                            f"{min_power:.6f}",
+                                        ]
+                                    )
+                                )
+
+                            if "BOND" in type1_table[0]:
+                                bond_max = max(row["BOND"] for row in type1_table)
+                                mc_se = math.sqrt(p.alpha * (1.0 - p.alpha) / p.m_type1)
+                                tolerance = 3.0 * mc_se + 0.01
+                                if stage_name == "oracle" and bond_max > p.alpha + tolerance:
+                                    consistency_warnings.append(
+                                        f"Warning: DRO size check borderline for nH={n_historical}, {outcome}, {scenario.key}, {stage_name}. "  # noqa: E501
+                                        f"max Type-I={bond_max:.4f}, alpha={p.alpha:.4f}, tol={tolerance:.4f}"
+                                    )
+
+                            stage_file = stage_name.replace(".", "p")
+                            pu.save_type1_power_figure(
+                                outdir=p.outdir,
+                                gamma_grid=p.gamma_grid,
+                                type1_table=type1_table,
+                                power_table=power_table,
+                                methods=method_order,
+                                style_map=style_map,
+                                alpha=p.alpha,
+                                filename_stem=f"type1_power_{outcome}_{scenario.key}_{stage_file}_nH{n_historical}",
+                                figsize=(12.8, 9.8),
                             )
 
-                        if "BOND" in type1_table[0]:
-                            bond_max = max(row["BOND"] for row in type1_table)
-                            mc_se = math.sqrt(p.alpha * (1.0 - p.alpha) / p.m_type1)
-                            tolerance = 3.0 * mc_se + 0.01
-                            if stage_name == "oracle" and bond_max > p.alpha + tolerance:
-                                consistency_warnings.append(
-                                    f"Warning: DRO size check borderline for nH={n_historical}, {outcome}, {scenario.key}, {stage_name}. "  # noqa: E501
-                                    f"max Type-I={bond_max:.4f}, alpha={p.alpha:.4f}, tol={tolerance:.4f}"
-                                )
+                            pu.save_type1_power_figure(
+                                outdir=p.outdir,
+                                gamma_grid=p.gamma_grid,
+                                type1_table=type1_table,
+                                power_table=power_table,
+                                methods=focus_methods,
+                                style_map=style_map,
+                                alpha=p.alpha,
+                                filename_stem=f"type1_power_focus_{outcome}_{scenario.key}_{stage_file}_nH{n_historical}",
+                                figsize=(11.8, 8.9),
+                            )
 
-                        stage_file = stage_name.replace(".", "p")
-                        pu.save_type1_power_figure(
-                            outdir=p.outdir,
-                            gamma_grid=p.gamma_grid,
-                            type1_table=type1_table,
-                            power_table=power_table,
-                            methods=method_order,
-                            style_map=style_map,
-                            alpha=p.alpha,
-                            filename_stem=f"type1_power_{outcome}_{scenario.key}_{stage_file}_nH{n_historical}",
-                            figsize=(12.8, 9.8),
-                        )
-
-                        pu.save_type1_power_figure(
-                            outdir=p.outdir,
-                            gamma_grid=p.gamma_grid,
-                            type1_table=type1_table,
-                            power_table=power_table,
-                            methods=focus_methods,
-                            style_map=style_map,
-                            alpha=p.alpha,
-                            filename_stem=f"type1_power_focus_{outcome}_{scenario.key}_{stage_file}_nH{n_historical}",
-                            figsize=(11.8, 8.9),
-                        )
-
-                        pu.save_lambda_figure(
-                            outdir=p.outdir,
-                            lambda_table=lambda_table,
-                            hist_arms=scenario.hist_arms,
-                            filename_stem=f"lambda_{outcome}_{scenario.key}_{stage_file}_nH{n_historical}",
-                        )
+                            pu.save_lambda_figure(
+                                outdir=p.outdir,
+                                lambda_table=lambda_table,
+                                hist_arms=scenario.hist_arms,
+                                filename_stem=f"lambda_{outcome}_{scenario.key}_{stage_file}_nH{n_historical}",
+                            )
+    finally:
+        progress.close()
 
     results_path = p.outdir / "summary.csv"
     with results_path.open("w", encoding="utf-8") as f:
