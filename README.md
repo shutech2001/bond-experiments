@@ -6,7 +6,7 @@ Materials for "[**Error-Controlled Borrowing from External Data Using Wasserstei
 ### Requirements and Setup
 ```
 # clone the repository
-git clone git@github.com:shutech2001/borrowing-based-on-dro.git
+git clone git@github.com:shutech2001/bond-experiments.git
 
 # build the environment with poetry
 poetry install
@@ -67,7 +67,6 @@ p = SimpleNamespace(
     map_weights=[0.5, 0.5],
     leap_prior_omega=0.5,
     leap_nex_scale=9.0,
-    exnex_prior_ex=0.7,
     mem_prior_inclusion=0.5,
     mem_tau=1.0,
     bhmoi_sharpness=1.0,
@@ -107,16 +106,6 @@ print("BOND arm means:", m_bond_arm0.mean, m_bond_arm1.mean)
 Notes:
 - Available families are in `METHOD_RUNNERS` inside `scripts/borrowing_methods.py`.
 - If you already have `MethodSpec`, call `estimate_arm_for_method(...)` for dispatch by method family.
-
-## Citation
-```text
-@article{kimura2026worst,
-    author={Kimura, Yui and Tamano, Shu},
-    journal={arXiv preprint arXiv:2602.NNNNN},
-    title={Error-Controlled Borrowing from External Data Using {Wasserstein} Ambiguity Sets},
-    year={2026},
-}
-```
 
 ## Contact
 
