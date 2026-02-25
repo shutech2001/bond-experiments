@@ -1,5 +1,5 @@
 # Experiments for BOND (Borrowing under Optimal Nonparametric Distributional robustness)
-Materials for "[**Error-Controlled Borrowing from External Data Using Wasserstein Ambiguity Sets**](https://arxiv.org/abs/2602.NNNNN)".
+Materials for "[**Error-Controlled Borrowing from External Data Using Wasserstein Ambiguity Sets**](https://arxiv.org/abs/2602.20503)".
 
 ## What is in this repo
 - Simulation study code: `scripts/dro_borrowing_simulation.py`
@@ -160,6 +160,16 @@ print("BOND arm means:", m_bond_arm0.mean, m_bond_arm1.mean)
 Notes:
 - Method families are defined in `METHOD_RUNNERS` in `scripts/borrowing_methods.py`.
 - For dispatch from `MethodSpec`, use `estimate_arm_for_method(...)`.
+
+## Citation
+```text
+@article{kimura2026error,
+    author={Kimura, Yui and Tamano, Shu},
+    journal={arXiv preprint arXiv:2602.20503},
+    title={Error-Controlled Borrowing from External Data Using Wasserstein Ambiguity Sets},
+    year={2026},
+}
+```
 
 ## Contact
 If you have any question, please feel free to contact: `tamano-shu212@g.ecc.u-tokyo.ac.jp`
