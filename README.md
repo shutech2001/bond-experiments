@@ -166,7 +166,7 @@ Notes:
 @article{kimura2026error,
     author={Kimura, Yui and Tamano, Shu},
     journal={arXiv preprint arXiv:2602.20503},
-    title={Error-Controlled Borrowing from External Data Using Wasserstein Ambiguity Sets},
+    title={Error-Controlled Borrowing from External Data Using {Wasserstein} Ambiguity Sets},
     year={2026},
 }
 ```
